@@ -11,6 +11,17 @@ python3.13 -m venv .venv
 
 If `python3.13` is not available, use `python3.12`.
 
+### Alternative setup with uv
+
+If only Python 3.14+ is installed (e.g. Arch Linux), use [uv](https://docs.astral.sh/uv/) to
+install Python 3.13 and create the venv:
+
+```bash
+uv python install 3.13
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy numpy
+```
+
 ## Run
 
 ```bash
