@@ -96,6 +96,26 @@ The quantum model auto-calibrates by timing a pilot batch, then subsamples
 training/validation/test data to fit within the time budget. Fewer qubits
 (`-qi` + `-qh`) and lower depth (`-qd`) run faster.
 
+### Run a Single Model
+
+Use `-m` / `--model` to run just one model (default: `all`):
+
+| `-m` value | Model |
+|------------|-------|
+| `all` | Run all enabled models |
+| `rf` | Random Forest |
+| `gb` | Gradient Boosting |
+| `mlp` | MLP Classifier |
+| `quantum` | Quantum LSTM |
+| `classical` | Classical ALSTM |
+| `oom` | OOM Test |
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o train -m rf
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qt 15
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10
+```
+
 ### Guard Options
 
 | Flag | Description | Default |

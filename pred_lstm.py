@@ -405,8 +405,8 @@ if __name__ == '__main__':
                         default='./data/tmp/model')
     parser.add_argument('-o', '--action', type=str, default='train',
                         help='train, test, pred')
-    parser.add_argument('-m', '--model', type=str, default='pure_lstm',
-                        help='pure_lstm, di_lstm, att_lstm, week_lstm, aw_lstm')
+    parser.add_argument('-m', '--model', type=str, default='all',
+                        help='which model to run: all, rf, gb, mlp, quantum, classical, oom')
     parser.add_argument('-f', '--fix_init', type=int, default=0,
                         help='use fixed initialization')
     parser.add_argument('-a', '--att', type=int, default=1,
@@ -442,6 +442,29 @@ if __name__ == '__main__':
     parser.add_argument('--sklearn', type=int, default=0,
                         help='run sklearn models: random forest, gradient boost, mlp (0=skip, 1=run)')
     args = parser.parse_args()
+
+    # -m / --model selects which model(s) to run
+    _MODEL_MAP = {
+        'rf': 'RANDOM FOREST', 'gb': 'GRADIENT BOOST', 'mlp': 'MLP CLASSIFIER',
+        'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
+    }
+    if args.model != 'all':
+        key = args.model.lower()
+        if key not in _MODEL_MAP:
+            print('ERROR: --model must be one of: all, %s' % ', '.join(_MODEL_MAP.keys()))
+            exit(1)
+        args.test_oom = 0
+        args.sklearn = 0
+        args.qlstm_epoch = 0
+        args.epoch = 0
+        if key in ('rf', 'gb', 'mlp'):
+            args.sklearn = 1
+        elif key == 'quantum':
+            args.qlstm_epoch = max(args.qlstm_epoch, 1) or 1
+        elif key == 'classical':
+            args.epoch = max(args.epoch, 1) or 150
+        elif key == 'oom':
+            args.test_oom = 1
 
     if args.timeout > 0:
         def _timeout_handler(signum, frame):
@@ -489,12 +512,13 @@ if __name__ == '__main__':
         summary = RunSummary()
 
         # Register all models that will run
+        only_name = _MODEL_MAP.get(args.model, '') if args.model != 'all' else ''
         if args.test_oom:
             summary.add_model('TEST OOM', 1)
         if args.sklearn:
-            summary.add_model('RANDOM FOREST', 1)
-            summary.add_model('GRADIENT BOOST', 1)
-            summary.add_model('MLP CLASSIFIER', 1)
+            for sk_name in ['RANDOM FOREST', 'GRADIENT BOOST', 'MLP CLASSIFIER']:
+                if not only_name or sk_name == only_name:
+                    summary.add_model(sk_name, 1)
         if args.qlstm_epoch > 0:
             summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
         if args.epoch > 0:
@@ -523,9 +547,12 @@ if __name__ == '__main__':
                 tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
                 hinge=hinge,
             )
+            only_name = _MODEL_MAP.get(args.model, '') if args.model != 'all' else ''
             for name, cls in [('RANDOM FOREST', RandomForestTrainer),
                                ('GRADIENT BOOST', GradientBoostTrainer),
                                ('MLP CLASSIFIER', MLPTrainer)]:
+                if only_name and name != only_name:
+                    continue
                 trainer = cls(**data_args)
                 _run_model(name, trainer.train, summary, args.mem_limit,
                            args.time_limit)
