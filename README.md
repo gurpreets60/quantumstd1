@@ -2,10 +2,14 @@
 
 ## Setup
 
+Requires Python 3.12 or 3.13 (TensorFlow does not yet support 3.14+).
+
 ```bash
 python3.13 -m venv .venv
 .venv/bin/pip install tensorflow tf-keras scikit-learn scipy numpy
 ```
+
+If `python3.13` is not available, use `python3.12`.
 
 ## Run
 
