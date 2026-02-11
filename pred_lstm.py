@@ -14,7 +14,7 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
 import pennylane as qml
 import psutil
 import random
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 from sklearn.metrics import accuracy_score, matthews_corrcoef, mean_squared_error
@@ -28,7 +28,7 @@ import torch.nn as nn
 
 
 class SystemMonitor:
-    def __init__(self, model_name='', total_epochs=0):
+    def __init__(self, model_name='', total_epochs=0, summary=None):
         psutil.cpu_percent(interval=None)
         self._has_gpu = self._check_gpu()
         self._console = Console()
@@ -39,6 +39,7 @@ class SystemMonitor:
         self._current_epoch = 0
         self._epoch_times = []
         self._train_start = None
+        self._summary = summary
 
     def _check_gpu(self):
         try:
@@ -97,6 +98,8 @@ class SystemMonitor:
             vram,
             eta,
         )
+        if self._summary:
+            return Group(self._summary.build_table(), table)
         return table
 
     def start(self):
@@ -116,6 +119,63 @@ class SystemMonitor:
 
     def log(self, message):
         self._live.console.print(message, highlight=False)
+
+
+class RunSummary:
+    """Shows a table of all models to train, updated with results as each finishes."""
+
+    def __init__(self):
+        self._console = Console()
+        self._models = []
+
+    def add_model(self, name, epochs):
+        self._models.append({
+            'name': name, 'status': 'PENDING', 'epochs': epochs,
+            'val_acc': '-', 'val_mcc': '-',
+            'test_acc': '-', 'test_mcc': '-', 'time': '-',
+        })
+
+    def start_model(self, name):
+        for m in self._models:
+            if m['name'] == name:
+                m['status'] = 'TRAINING'
+
+    def finish_model(self, name, val_perf, test_perf, elapsed):
+        for m in self._models:
+            if m['name'] == name:
+                m['status'] = 'DONE'
+                m['val_acc'] = '%.4f' % val_perf.get('acc', 0)
+                m['val_mcc'] = '%.4f' % val_perf.get('mcc', 0)
+                m['test_acc'] = '%.4f' % test_perf.get('acc', 0)
+                m['test_mcc'] = '%.4f' % test_perf.get('mcc', 0)
+                m['time'] = '%.1fs' % elapsed
+
+    def build_table(self):
+        table = Table(title='Training Pipeline', expand=True)
+        table.add_column('Model', justify='left')
+        table.add_column('Status', justify='center')
+        table.add_column('Epochs', justify='center')
+        table.add_column('Val Acc', justify='center')
+        table.add_column('Val MCC', justify='center')
+        table.add_column('Test Acc', justify='center')
+        table.add_column('Test MCC', justify='center')
+        table.add_column('Time', justify='center')
+        for m in self._models:
+            style = None
+            if m['status'] == 'TRAINING':
+                style = 'bold yellow'
+            elif m['status'] == 'DONE':
+                style = 'bold green'
+            table.add_row(
+                m['name'], m['status'], str(m['epochs']),
+                m['val_acc'], m['val_mcc'],
+                m['test_acc'], m['test_mcc'], m['time'],
+                style=style,
+            )
+        return table
+
+    def print(self):
+        self._console.print(self.build_table())
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +341,13 @@ class QuantumTrainer:
         mcc = matthews_corrcoef(gt_np, binary_pred)
         return {'acc': acc, 'mcc': mcc}
 
-    def train(self):
-        monitor = SystemMonitor(model_name='QUANTUM LSTM', total_epochs=self.epochs)
+    def train(self, summary=None):
+        if summary:
+            summary.start_model('QUANTUM LSTM')
+        monitor = SystemMonitor(model_name='QUANTUM LSTM', total_epochs=self.epochs, summary=summary)
         best_valid_perf = {'acc': 0, 'mcc': -2}
         best_test_perf = {'acc': 0, 'mcc': -2}
+        train_t0 = time()
 
         monitor.start()
         for epoch in range(self.epochs):
@@ -339,6 +402,8 @@ class QuantumTrainer:
         monitor.stop()
         print('\n[QUANTUM LSTM] Best Valid performance:', best_valid_perf)
         print('\t[QUANTUM LSTM] Best Test performance:', best_test_perf)
+        if summary:
+            summary.finish_model('QUANTUM LSTM', best_valid_perf, best_test_perf, time() - train_t0)
         return best_valid_perf, best_test_perf
 
 
@@ -947,7 +1012,7 @@ class AWLSTM:
         sess.close()
         tf.reset_default_graph()
 
-    def train(self, tune_para=False):
+    def train(self, tune_para=False, summary=None):
         self.construct_graph()
 
         sess = tf.Session()
@@ -968,7 +1033,10 @@ class AWLSTM:
             'acc': 0, 'mcc': -2
         }
 
-        monitor = SystemMonitor(model_name='CLASSICAL ALSTM', total_epochs=self.epochs)
+        monitor = SystemMonitor(model_name='CLASSICAL ALSTM', total_epochs=self.epochs, summary=summary)
+        if summary:
+            summary.start_model('CLASSICAL ALSTM')
+        train_t0 = time()
         bat_count = self.tra_pv.shape[0] // self.batch_size
         if not (self.tra_pv.shape[0] % self.batch_size == 0):
             bat_count += 1
@@ -1072,6 +1140,8 @@ class AWLSTM:
         monitor.stop()
         print('\n[CLASSICAL ALSTM] Best Valid performance:', best_valid_perf)
         print('\t[CLASSICAL ALSTM] Best Test performance:', best_test_perf)
+        if summary:
+            summary.finish_model('CLASSICAL ALSTM', best_valid_perf, best_test_perf, time() - train_t0)
         sess.close()
         tf.reset_default_graph()
         if tune_para:
@@ -1193,6 +1263,13 @@ if __name__ == '__main__':
     )
 
     if args.action == 'train':
+        summary = RunSummary()
+        if args.qlstm_epoch > 0:
+            summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
+        if args.epoch > 0:
+            summary.add_model('CLASSICAL ALSTM', args.epoch)
+        summary.print()
+
         # Quantum LSTM first (if epochs > 0)
         if args.qlstm_epoch > 0:
             print('\n===== QUANTUM LSTM =====')
@@ -1209,11 +1286,15 @@ if __name__ == '__main__':
                 hinge=(args.hinge_lose == 1),
                 time_budget=args.qlstm_time,
             )
-            qt.train()
+            qt.train(summary=summary)
 
         # Classical ALSTM second
-        print('\n===== CLASSICAL ALSTM =====')
-        pure_LSTM.train()
+        if args.epoch > 0:
+            print('\n===== CLASSICAL ALSTM =====')
+            pure_LSTM.train(summary=summary)
+
+        print()
+        summary.print()
     elif args.action == 'test':
         pure_LSTM.test()
     elif args.action == 'report':
