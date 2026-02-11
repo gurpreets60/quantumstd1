@@ -10,12 +10,56 @@ _nvidia_dir = pathlib.Path(__file__).resolve().parent / '.venv' / 'lib'
 for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
+import psutil
 import random
 from sklearn.metrics import accuracy_score, matthews_corrcoef, mean_squared_error
 from sklearn.utils import shuffle
+import subprocess
 import tensorflow.compat.v1 as tf
 tf.disable_eager_execution()
 from time import time
+
+
+class SystemMonitor:
+    def __init__(self):
+        # prime cpu_percent so first call returns a real value
+        psutil.cpu_percent(interval=None)
+        self._has_gpu = self._check_gpu()
+
+    def _check_gpu(self):
+        try:
+            subprocess.run(
+                ['nvidia-smi'], capture_output=True, check=True
+            )
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return False
+
+    def _gpu_stats(self):
+        if not self._has_gpu:
+            return 'N/A'
+        try:
+            out = subprocess.run(
+                ['nvidia-smi',
+                 '--query-gpu=utilization.gpu,memory.used,memory.total',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, check=True
+            ).stdout.strip()
+            util, mem_used, mem_total = [x.strip() for x in out.split(',')]
+            return f'{util}% | VRAM: {mem_used}/{mem_total} MB'
+        except Exception:
+            return 'N/A'
+
+    def snapshot(self, phase):
+        mem = psutil.virtual_memory()
+        ram_used = mem.used / (1024 ** 3)
+        ram_total = mem.total / (1024 ** 3)
+        cpu = psutil.cpu_percent(interval=None)
+        gpu = self._gpu_stats()
+        return (
+            f'[RAM: {ram_used:.1f}/{ram_total:.1f} GB ({mem.percent}%) | '
+            f'CPU: {cpu}% | GPU: {gpu} | {phase}]'
+        )
 
 
 def load_cla_data(data_path, tra_date, val_date, tes_date, seq=2,
@@ -644,11 +688,14 @@ class AWLSTM:
             'acc': 0, 'mcc': -2
         }
 
+        monitor = SystemMonitor()
         bat_count = self.tra_pv.shape[0] // self.batch_size
         if not (self.tra_pv.shape[0] % self.batch_size == 0):
             bat_count += 1
         for i in range(self.epochs):
             t1 = time()
+            print(monitor.snapshot(
+                f'Training batches (epoch {i}/{self.epochs})'))
             # first_batch = True
             tra_loss = 0.0
             tra_obj = 0.0
@@ -675,6 +722,7 @@ class AWLSTM:
                   tra_loss / bat_count, l2 / bat_count, tra_adv / bat_count)
 
             if not tune_para:
+                print(monitor.snapshot('Evaluating training accuracy'))
                 tra_loss = 0.0
                 tra_obj = 0.0
                 l2 = 0.0
@@ -700,6 +748,7 @@ class AWLSTM:
                       l2 / bat_count, '\tTrain per:', tra_acc / bat_count)
 
             # test on validation set
+            print(monitor.snapshot('Evaluating validation set'))
             feed_dict = {
                 self.pv_var: self.val_pv,
                 self.wd_var: self.val_wd,
@@ -712,6 +761,7 @@ class AWLSTM:
             print('\tVal per:', cur_valid_perf, '\tVal loss:', val_loss)
 
             # test on testing set
+            print(monitor.snapshot('Evaluating test set'))
             feed_dict = {
                 self.pv_var: self.tes_pv,
                 self.wd_var: self.tes_wd,
@@ -735,6 +785,7 @@ class AWLSTM:
             )
             t4 = time()
             print('epoch:', i, ('time: %.4f ' % (t4 - t1)))
+            print(monitor.snapshot(f'Epoch {i} complete'))
         print('\nBest Valid performance:', best_valid_perf)
         print('\tBest Test performance:', best_test_perf)
         sess.close()
