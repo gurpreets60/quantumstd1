@@ -7,7 +7,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 or 3.13 (TensorFlow do
 ```bash
 uv python install 3.13
 uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy numpy psutil
+uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy numpy psutil rich
 ```
 
 ## Run

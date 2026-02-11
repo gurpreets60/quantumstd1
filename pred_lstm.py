@@ -12,6 +12,9 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 import psutil
 import random
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
 from sklearn.metrics import accuracy_score, matthews_corrcoef, mean_squared_error
 from sklearn.utils import shuffle
 import subprocess
@@ -22,9 +25,11 @@ from time import time
 
 class SystemMonitor:
     def __init__(self):
-        # prime cpu_percent so first call returns a real value
         psutil.cpu_percent(interval=None)
         self._has_gpu = self._check_gpu()
+        self._console = Console()
+        self._live = Live(console=self._console, refresh_per_second=4)
+        self._phase = ''
 
     def _check_gpu(self):
         try:
@@ -37,7 +42,7 @@ class SystemMonitor:
 
     def _gpu_stats(self):
         if not self._has_gpu:
-            return 'N/A'
+            return 'N/A', '', ''
         try:
             out = subprocess.run(
                 ['nvidia-smi',
@@ -46,20 +51,44 @@ class SystemMonitor:
                 capture_output=True, text=True, check=True
             ).stdout.strip()
             util, mem_used, mem_total = [x.strip() for x in out.split(',')]
-            return f'{util}% | VRAM: {mem_used}/{mem_total} MB'
+            return f'{util}%', f'{mem_used} MB', f'{mem_total} MB'
         except Exception:
-            return 'N/A'
+            return 'N/A', '', ''
 
-    def snapshot(self, phase):
+    def _build_table(self):
         mem = psutil.virtual_memory()
         ram_used = mem.used / (1024 ** 3)
         ram_total = mem.total / (1024 ** 3)
         cpu = psutil.cpu_percent(interval=None)
-        gpu = self._gpu_stats()
-        return (
-            f'[RAM: {ram_used:.1f}/{ram_total:.1f} GB ({mem.percent}%) | '
-            f'CPU: {cpu}% | GPU: {gpu} | {phase}]'
+        gpu_util, gpu_used, gpu_total = self._gpu_stats()
+
+        table = Table(title=self._phase, expand=True)
+        table.add_column('RAM', justify='center')
+        table.add_column('CPU', justify='center')
+        table.add_column('GPU', justify='center')
+        table.add_column('VRAM', justify='center')
+
+        vram = f'{gpu_used}/{gpu_total}' if gpu_used else 'N/A'
+        table.add_row(
+            f'{ram_used:.1f}/{ram_total:.1f} GB ({mem.percent}%)',
+            f'{cpu}%',
+            gpu_util,
+            vram,
         )
+        return table
+
+    def start(self):
+        self._live.start()
+
+    def stop(self):
+        self._live.stop()
+
+    def update(self, phase):
+        self._phase = phase
+        self._live.update(self._build_table())
+
+    def log(self, message):
+        self._live.console.print(message, highlight=False)
 
 
 def load_cla_data(data_path, tra_date, val_date, tes_date, seq=2,
@@ -692,11 +721,10 @@ class AWLSTM:
         bat_count = self.tra_pv.shape[0] // self.batch_size
         if not (self.tra_pv.shape[0] % self.batch_size == 0):
             bat_count += 1
+        monitor.start()
         for i in range(self.epochs):
             t1 = time()
-            print(monitor.snapshot(
-                f'Training batches (epoch {i}/{self.epochs})'))
-            # first_batch = True
+            monitor.update(f'Training batches (epoch {i}/{self.epochs})')
             tra_loss = 0.0
             tra_obj = 0.0
             l2 = 0.0
@@ -718,11 +746,12 @@ class AWLSTM:
                 tra_obj += cur_obj
                 l2 += cur_l2
                 tra_adv += cur_al
-            print('----->>>>> Training:', tra_obj / bat_count,
-                  tra_loss / bat_count, l2 / bat_count, tra_adv / bat_count)
+            monitor.log('----->>>>> Training: %s %s %s %s' % (
+                tra_obj / bat_count, tra_loss / bat_count,
+                l2 / bat_count, tra_adv / bat_count))
 
             if not tune_para:
-                print(monitor.snapshot('Evaluating training accuracy'))
+                monitor.update('Evaluating training accuracy')
                 tra_loss = 0.0
                 tra_obj = 0.0
                 l2 = 0.0
@@ -744,11 +773,12 @@ class AWLSTM:
                     l2 += cur_l2
                     tra_obj += cur_obj
                     tra_acc += cur_tra_perf['acc']
-                print('Training:', tra_obj / bat_count, tra_loss / bat_count,
-                      l2 / bat_count, '\tTrain per:', tra_acc / bat_count)
+                monitor.log('Training: %s %s %s \tTrain per: %s' % (
+                    tra_obj / bat_count, tra_loss / bat_count,
+                    l2 / bat_count, tra_acc / bat_count))
 
             # test on validation set
-            print(monitor.snapshot('Evaluating validation set'))
+            monitor.update('Evaluating validation set')
             feed_dict = {
                 self.pv_var: self.val_pv,
                 self.wd_var: self.val_wd,
@@ -758,10 +788,11 @@ class AWLSTM:
                 (self.loss, self.pred), feed_dict
             )
             cur_valid_perf = evaluate(val_pre, self.val_gt, self.hinge)
-            print('\tVal per:', cur_valid_perf, '\tVal loss:', val_loss)
+            monitor.log('\tVal per: %s \tVal loss: %s' % (
+                cur_valid_perf, val_loss))
 
             # test on testing set
-            print(monitor.snapshot('Evaluating test set'))
+            monitor.update('Evaluating test set')
             feed_dict = {
                 self.pv_var: self.tes_pv,
                 self.wd_var: self.tes_wd,
@@ -771,7 +802,8 @@ class AWLSTM:
                 (self.loss, self.pred), feed_dict
             )
             cur_test_perf = evaluate(tes_pre, self.tes_gt, self.hinge)
-            print('\tTest per:', cur_test_perf, '\tTest loss:', test_loss)
+            monitor.log('\tTest per: %s \tTest loss: %s' % (
+                cur_test_perf, test_loss))
 
             if cur_valid_perf['acc'] > best_valid_perf['acc']:
                 best_valid_perf = copy.copy(cur_valid_perf)
@@ -784,8 +816,8 @@ class AWLSTM:
                 self.tra_pv, self.tra_wd, self.tra_gt, random_state=0
             )
             t4 = time()
-            print('epoch:', i, ('time: %.4f ' % (t4 - t1)))
-            print(monitor.snapshot(f'Epoch {i} complete'))
+            monitor.log('epoch: %d time: %.4f' % (i, t4 - t1))
+        monitor.stop()
         print('\nBest Valid performance:', best_valid_perf)
         print('\tBest Test performance:', best_test_perf)
         sess.close()
