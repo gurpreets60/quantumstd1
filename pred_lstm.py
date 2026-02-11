@@ -572,6 +572,22 @@ if __name__ == '__main__':
 
     print(args)
 
+    # CFA standalone — no data loading needed
+    if args.action == 'cfa':
+        if not args.run_dir:
+            import glob as globmod
+            runs = sorted(globmod.glob('data/run_*'))
+            if not runs:
+                print('ERROR: no run directories found. Train first or use --run_dir.')
+                exit(1)
+            args.run_dir = runs[-1]
+            print('[CFA] Using most recent run: %s' % args.run_dir)
+        cfa_filter = None
+        if args.cfa_models:
+            cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
+        run_cfa(args.run_dir, time_limit=args.cfa_time, models_filter=cfa_filter)
+        exit(0)
+
     parameters = {
         'seq': int(args.seq),
         'unit': int(args.unit),
@@ -693,20 +709,6 @@ if __name__ == '__main__':
         print()
         summary.print()
         print('Run saved to: %s' % os.path.abspath(summary.run_dir))
-    elif args.action == 'cfa':
-        if not args.run_dir:
-            # Find the most recent run directory
-            import glob as globmod
-            runs = sorted(globmod.glob('data/run_*'))
-            if not runs:
-                print('ERROR: no run directories found. Train first or use --run_dir.')
-                exit(1)
-            args.run_dir = runs[-1]
-            print('[CFA] Using most recent run: %s' % args.run_dir)
-        cfa_filter = None
-        if args.cfa_models:
-            cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
-        run_cfa(args.run_dir, time_limit=args.cfa_time, models_filter=cfa_filter)
     elif args.action == 'test':
         pure_LSTM.test()
     elif args.action == 'report':

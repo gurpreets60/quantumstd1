@@ -1,33 +1,39 @@
 # quantumstd1
 
-Quantum and classical models for stock movement prediction. Runs up to 5 models
-(Random Forest, Gradient Boosting, MLP, Quantum LSTM, Classical ALSTM), then
-fuses their predictions with Combinatorial Fusion Analysis (CFA). Each model is
-guarded by per-model RAM and time limits and monitored with live system stats
-(RAM, CPU, GPU, ETA).
+Quantum and classical models for stock movement prediction. Runs up to 6 models
+(Random Forest, Gradient Boosting, MLP, Logistic Regression, Quantum LSTM,
+Classical ALSTM), then fuses their predictions with Combinatorial Fusion
+Analysis (CFA). Each model is guarded by per-model RAM and time limits and
+monitored with live system stats (RAM, CPU, GPU, ETA).
 
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 or 3.13 (TensorFlow does not yet support 3.14+).
 
 ```bash
+# or run: bash setup.sh
 uv python install 3.13
 uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy numpy psutil rich pennylane torch pandas
 ```
 
-## Run
+## Quick Start
 
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 5 -e 10
+# all sklearn models (fast, <2s total)
+uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1
+
+# single model
+uv run --python .venv/bin/python pred_lstm.py -o train -m rf
+
+# full pipeline: sklearn + quantum (1 epoch) + classical (1 epoch)
+uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 1 -e 1 --time_limit 30
+
+# run CFA on previous results (instant, no training)
+uv run --python .venv/bin/python pred_lstm.py -o cfa
 ```
 
-This trains the 3 sklearn models, the Quantum LSTM for 5 epochs, then the
-Classical ALSTM for 10 epochs, and finishes with CFA fusion. Set `--sklearn 0`
-to skip sklearn models, `-qe 0` to skip the quantum model, `-e 0` to skip the
-classical model.
-
-### Output / CFA Results
+### Output
 
 Each run creates a timestamped folder under `data/`:
 
@@ -39,59 +45,96 @@ data/run_YYYYMMDD_HHMMSS/
   pred_<MODEL>_test.csv    # per-model test predictions
 ```
 
-**CFA results** are printed to the console at the end of training and saved to
-`cfa_results.csv` in the run folder. The CSV contains columns: `combination`,
-`method`, `n_models`, `score`. The top-15 results are shown in the terminal.
-
-### Actions
+## Actions
 
 | Flag | Action |
 |------|--------|
-| `-o train` | Train the model(s) and run CFA |
-| `-o cfa` | Run CFA on a previous run (no training) |
+| `-o train` | Train model(s) and run CFA |
+| `-o cfa` | Run CFA on a previous run (no training, instant) |
 | `-o test` | Evaluate on val/test sets |
 | `-o pred` | Save predictions to file |
 | `-o adv` | Evaluate adversarial robustness |
 | `-o latent` | Extract latent representations |
 
-### CFA Options
+## Model Selection
+
+Use `-m` / `--model` to run a single model, or `--sklearn 1` for all sklearn models:
+
+| `-m` value | Model |
+|------------|-------|
+| `all` | All enabled models (default) |
+| `rf` | Random Forest |
+| `gb` | Gradient Boosting |
+| `mlp` | MLP Classifier |
+| `lr` | Logistic Regression |
+| `quantum` | Quantum LSTM |
+| `classical` | Classical ALSTM |
+| `oom` | OOM Test |
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o train -m rf
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qt 15 --time_limit 30
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10 --time_limit 0
+```
+
+## CFA (Combinatorial Fusion Analysis)
+
+CFA fuses predictions from multiple models. Runs automatically after training,
+or standalone with `-o cfa`:
+
+```bash
+# CFA on most recent run (auto-detected)
+uv run --python .venv/bin/python pred_lstm.py -o cfa
+
+# CFA on a specific run
+uv run --python .venv/bin/python pred_lstm.py -o cfa --run_dir data/run_20260211_000403
+
+# CFA with selected models only
+uv run --python .venv/bin/python pred_lstm.py -o cfa --cfa_models "RANDOM FOREST,GRADIENT BOOST"
+
+# CFA with longer time limit (for many models)
+uv run --python .venv/bin/python pred_lstm.py -o cfa --cfa_time 5
+```
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--cfa_time` | Time limit in seconds for CFA (0=unlimited) | `1.0` |
+| `--cfa_time` | Time limit for CFA in seconds (0=unlimited) | `1.0` |
 | `--cfa_models` | Comma-separated model names to include | all |
-| `--run_dir` | Path to a previous run directory (for `-o cfa`) | most recent |
-
-Run CFA standalone on the most recent run:
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o cfa
-```
-
-Run CFA on a specific run with selected models:
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o cfa --run_dir data/run_20260211_000403 --cfa_models "RANDOM FOREST,GRADIENT BOOST,CLASSICAL ALSTM"
-```
+| `--run_dir` | Path to a previous run directory | most recent |
 
 CFA evaluates combinations smallest-first and stops when the time limit is
-reached. With many models, increase `--cfa_time` to evaluate more combinations.
+reached. Results are saved to `cfa_results.csv` in the run folder and top-15
+are printed to the terminal.
 
-### Sklearn Model Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--sklearn` | Run sklearn models: RF, GB, MLP, LR (0/1) | `0` |
-
-Sklearn models auto-calibrate training set size via a pilot fit to stay within
-their time budget (0.8s by default). They flatten the 3D stock data to 2D for
-classification.
-
-### Classical ALSTM Options
+## Guard Options
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-p` | Path to price data | `./data/stocknet-dataset/price/ourpped` |
+| `--mem_limit` | Per-model RAM limit in GB (0=off) | `1.0` |
+| `--time_limit` | Per-model time limit in seconds (0=off) | `1.0` |
+| `--test_oom` | Run OOM test model to verify MemoryGuard (0/1) | `0` |
+| `--oom_gb` | GB the OOM test tries to allocate | `2.0` |
+| `-t` | Hard timeout — kill entire script after N seconds (0=off) | `0` |
+
+Models that exceed their limit are killed and excluded from CFA.
+
+**Note:** The default `--time_limit 1` is strict. Use `--time_limit 30` for
+quantum/classical models that need more time, or `--time_limit 0` to disable.
+
+## Model-Specific Options
+
+### Sklearn Models
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--sklearn` | Run all sklearn models: RF, GB, MLP, LR (0/1) | `0` |
+
+Auto-calibrates training set size via pilot fit to stay within time budget.
+
+### Classical ALSTM
+
+| Flag | Description | Default |
+|------|-------------|---------|
 | `-e` | Number of epochs | `150` |
 | `-b` | Batch size | `1024` |
 | `-l` | Sequence length | `5` |
@@ -103,10 +146,11 @@ classification.
 | `-f` | Fixed random seed (0/1) | `0` |
 | `-g` | Use GPU (0/1) | `0` |
 | `-rl` | Reload saved model (0/1) | `0` |
+| `-p` | Path to price data | `./data/stocknet-dataset/price/ourpped` |
 | `-q` | Path to load model from | `./data/saved_model/acl18_alstm/exp` |
 | `-qs` | Path to save model to | `./data/tmp/model` |
 
-### Quantum LSTM Options
+### Quantum LSTM
 
 | Flag | Description | Default |
 |------|-------------|---------|
@@ -116,74 +160,29 @@ classification.
 | `-qd` | VQC circuit depth | `1` |
 | `-qt` | Time budget in seconds | `10` |
 
-The quantum model auto-calibrates by timing a pilot batch, then subsamples
-training/validation/test data to fit within the time budget. Fewer qubits
-(`-qi` + `-qh`) and lower depth (`-qd`) run faster.
+Auto-calibrates by timing a pilot batch, then subsamples data to fit within
+the time budget.
 
-### Run a Single Model
-
-Use `-m` / `--model` to run just one model (default: `all`):
-
-| `-m` value | Model |
-|------------|-------|
-| `all` | Run all enabled models |
-| `rf` | Random Forest |
-| `gb` | Gradient Boosting |
-| `mlp` | MLP Classifier |
-| `lr` | Logistic Regression |
-| `quantum` | Quantum LSTM |
-| `classical` | Classical ALSTM |
-| `oom` | OOM Test |
+## Examples
 
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -o train -m rf
-uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qt 15
-uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10
-```
+# Full pipeline: all sklearn + quantum (3 epochs) + classical (10 epochs)
+uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 3 -e 10 -qt 15 --time_limit 30
 
-### Guard Options
+# Classical only, 10 epochs with adversarial training
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10 -v 1 --time_limit 0
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--mem_limit` | Per-model RAM limit in GB (0=off) | `1.0` |
-| `--time_limit` | Per-model time limit in seconds (0=off) | `1.0` |
-| `--test_oom` | Run OOM test model to verify MemoryGuard (0/1) | `0` |
-| `--oom_gb` | GB the OOM test model tries to allocate | `2.0` |
-| `-t` | Hard timeout — kill entire script after N seconds (0=off) | `0` |
+# Sklearn models only
+uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1
 
-Models that exceed their RAM or time limit are killed and recorded with zero
-accuracy. Killed models are excluded from CFA fusion.
+# Minimal quantum test (2 qubits, fastest possible)
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qe 1 -qi 1 -qh 1 -qd 1 -qt 5
 
-### Examples
-
-Full pipeline with all models (sklearn + quantum + classical + CFA):
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 3 -e 10 -qt 15
-```
-
-Classical only, 10 epochs with adversarial training:
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o train -e 10 -v 1
-```
-
-Sklearn models only with 30s time limit, no classical/quantum:
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 0 -e 0 --time_limit 30
-```
-
-Minimal quantum test (2 qubits, fastest possible):
-
-```bash
-uv run --python .venv/bin/python pred_lstm.py -o train -qe 1 -qi 1 -qh 1 -qd 1 -qt 5 -e 0
-```
-
-Debug run (1 epoch each, verify all guards and CFA):
-
-```bash
+# Debug run (1 epoch each, all models)
 uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 1 -e 1 --time_limit 30
+
+# CFA on previous results
+uv run --python .venv/bin/python pred_lstm.py -o cfa
 ```
 
 ## Hyperparameter Recipes
@@ -192,34 +191,34 @@ uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 1 -e 1 --
 
 **LSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -a 0 -l 10 -u 32 -l2 10 -f 1
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -a 0 -l 10 -u 32 -l2 10 -f 1 --time_limit 0
 ```
 
 **ALSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -f 1
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -l 5 -u 4 -l2 1 -f 1 --time_limit 0
 ```
 
 **Adv-ALSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -v 1 -rl 1 -q ./data/saved_model/acl18_alstm/exp -la 0.01 -le 0.05
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -l 5 -u 4 -l2 1 -v 1 -rl 1 -q ./data/saved_model/acl18_alstm/exp -la 0.01 -le 0.05 --time_limit 0
 ```
 
 ### KDD17 dataset
 
 **LSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 5 -u 4 -l2 0.001 -a 0 -f 1
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -p ./data/kdd17/ourpped/ -l 5 -u 4 -l2 0.001 -a 0 -f 1 --time_limit 0
 ```
 
 **ALSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -f 1
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -f 1 --time_limit 0
 ```
 
 **Adv-ALSTM:**
 ```bash
-uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -v 1 -rl 1 -q ./data/saved_model/kdd17_alstm/model -la 0.05 -le 0.001 -f 1
+uv run --python .venv/bin/python pred_lstm.py -o train -m classical -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -v 1 -rl 1 -q ./data/saved_model/kdd17_alstm/model -la 0.05 -le 0.001 -f 1 --time_limit 0
 ```
 
 ## How to Add a New Model
