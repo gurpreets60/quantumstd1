@@ -275,3 +275,58 @@ class MemoryGuard:
     @property
     def exceeded(self):
         return self._exceeded
+
+
+class TimeGuard:
+    """Enforces a per-model time limit. Kills the model if it runs too long.
+
+    Usage::
+
+        with TimeGuard(limit_sec=60):
+            model.train(summary=summary)
+        # If model ran longer than 60 seconds, a TimeoutError is raised.
+    """
+
+    def __init__(self, limit_sec=1.0, check_interval=0.25):
+        self.limit_sec = limit_sec
+        self.check_interval = check_interval
+        self._start = 0
+        self._exceeded = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        self._start = time()
+        self._exceeded = False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+        print(f'[TimeGuard] Limit: {self.limit_sec:.1f}s')
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        elapsed = time() - self._start
+        print(f'[TimeGuard] Elapsed: {elapsed:.1f}s')
+        return False
+
+    def _watch(self):
+        main_tid = threading.main_thread().ident
+        while not self._stop.is_set():
+            elapsed = time() - self._start
+            if elapsed > self.limit_sec:
+                self._exceeded = True
+                print(f'\n[TimeGuard] KILLED: model ran {elapsed:.1f}s '
+                      f'(limit: {self.limit_sec:.1f}s)')
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(main_tid),
+                    ctypes.py_object(TimeoutError),
+                )
+                break
+            self._stop.wait(self.check_interval)
+
+    @property
+    def exceeded(self):
+        return self._exceeded

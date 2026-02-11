@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext as _nullcontext
 import os
 import signal
 import pathlib
@@ -9,7 +10,7 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 
-from models import AWLSTM, QuantumTrainer, RunSummary, MemoryGuard, OOMTestTrainer
+from models import AWLSTM, QuantumTrainer, RunSummary, MemoryGuard, TimeGuard, OOMTestTrainer
 
 if __name__ == '__main__':
     desc = 'the lstm model'
@@ -72,6 +73,8 @@ if __name__ == '__main__':
                         help='GB the OOM test model tries to allocate')
     parser.add_argument('--mem_limit', type=float, default=1.0,
                         help='per-model RAM limit in GB (0=no limit)')
+    parser.add_argument('--time_limit', type=float, default=1.0,
+                        help='per-model time limit in seconds (0=no limit)')
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -116,21 +119,28 @@ if __name__ == '__main__':
         reload=args.reload
     )
 
-    def _run_model(name, train_fn, summary, mem_limit_gb):
-        """Run a model's train(), wrapped in MemoryGuard if limit > 0."""
+    def _run_model(name, train_fn, summary, mem_limit_gb, time_limit_sec):
+        """Run a model's train(), wrapped in MemoryGuard and TimeGuard."""
         print('\n===== %s =====' % name)
-        if mem_limit_gb > 0:
-            try:
-                with MemoryGuard(limit_gb=mem_limit_gb):
+        killed = False
+        kill_reason = ''
+        try:
+            with (MemoryGuard(limit_gb=mem_limit_gb) if mem_limit_gb > 0
+                  else _nullcontext()):
+                with (TimeGuard(limit_sec=time_limit_sec) if time_limit_sec > 0
+                      else _nullcontext()):
                     train_fn(summary=summary)
-            except MemoryError:
-                print('\n[MemoryGuard] %s exceeded %.1f GB limit — KILLED' %
-                      (name, mem_limit_gb))
-                if summary:
-                    summary.finish_model(name, {'acc': 0, 'mcc': 0},
-                                         {'acc': 0, 'mcc': 0}, 0)
-        else:
-            train_fn(summary=summary)
+        except MemoryError:
+            killed = True
+            kill_reason = 'exceeded %.1f GB RAM limit' % mem_limit_gb
+        except TimeoutError:
+            killed = True
+            kill_reason = 'exceeded %.1f s time limit' % time_limit_sec
+        if killed:
+            print('\n[Guard] %s — %s — KILLED' % (name, kill_reason))
+            if summary:
+                summary.finish_model(name, {'acc': 0, 'mcc': 0},
+                                     {'acc': 0, 'mcc': 0}, 0)
 
     if args.action == 'train':
         import gc
@@ -153,7 +163,8 @@ if __name__ == '__main__':
                 tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
                 epochs=1, target_gb=args.oom_gb,
             )
-            _run_model('TEST OOM', oom.train, summary, args.mem_limit)
+            _run_model('TEST OOM', oom.train, summary, args.mem_limit,
+                       args.time_limit)
             del oom
             gc.collect()
 
@@ -172,14 +183,15 @@ if __name__ == '__main__':
                 hinge=(args.hinge_lose == 1),
                 time_budget=args.qlstm_time,
             )
-            _run_model('QUANTUM LSTM', qt.train, summary, args.mem_limit)
+            _run_model('QUANTUM LSTM', qt.train, summary, args.mem_limit,
+                       args.time_limit)
             del qt
             gc.collect()
 
         # Classical ALSTM
         if args.epoch > 0:
             _run_model('CLASSICAL ALSTM', pure_LSTM.train, summary,
-                       args.mem_limit)
+                       args.mem_limit, args.time_limit)
 
         print()
         summary.print()
