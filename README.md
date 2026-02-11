@@ -2,19 +2,7 @@
 
 ## Setup
 
-Requires Python 3.12 or 3.13 (TensorFlow does not yet support 3.14+).
-
-```bash
-python3.13 -m venv .venv
-.venv/bin/pip install tensorflow tf-keras scikit-learn scipy numpy
-```
-
-If `python3.13` is not available, use `python3.12`.
-
-### Alternative setup with uv
-
-If only Python 3.14+ is installed (e.g. Arch Linux), use [uv](https://docs.astral.sh/uv/) to
-install Python 3.13 and create the venv:
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 or 3.13 (TensorFlow does not yet support 3.14+).
 
 ```bash
 uv python install 3.13
@@ -25,7 +13,7 @@ uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy 
 ## Run
 
 ```bash
-.venv/bin/python pred_lstm.py -p ./data/stocknet-dataset/price/ourpped -o train
+uv run --python .venv/bin/python pred_lstm.py -p ./data/stocknet-dataset/price/ourpped -o train
 ```
 
 ### Actions
@@ -62,7 +50,7 @@ uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy 
 Train for 10 epochs with adversarial training:
 
 ```bash
-.venv/bin/python pred_lstm.py -p ./data/stocknet-dataset/price/ourpped -o train -e 10 -v 1
+uv run --python .venv/bin/python pred_lstm.py -p ./data/stocknet-dataset/price/ourpped -o train -e 10 -v 1
 ```
 
 ## Hyperparameter Recipes
@@ -71,32 +59,32 @@ Train for 10 epochs with adversarial training:
 
 **LSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -a 0 -l 10 -u 32 -l2 10 -f 1
+uv run --python .venv/bin/python pred_lstm.py -a 0 -l 10 -u 32 -l2 10 -f 1
 ```
 
 **ALSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -f 1
+uv run --python .venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -f 1
 ```
 
 **Adv-ALSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -v 1 -rl 1 -q ./data/saved_model/acl18_alstm/exp -la 0.01 -le 0.05
+uv run --python .venv/bin/python pred_lstm.py -l 5 -u 4 -l2 1 -v 1 -rl 1 -q ./data/saved_model/acl18_alstm/exp -la 0.01 -le 0.05
 ```
 
 ### KDD17 dataset
 
 **LSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 5 -u 4 -l2 0.001 -a 0 -f 1
+uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 5 -u 4 -l2 0.001 -a 0 -f 1
 ```
 
 **ALSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -f 1
+uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -f 1
 ```
 
 **Adv-ALSTM:**
 ```bash
-.venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -v 1 -rl 1 -q ./data/saved_model/kdd17_alstm/model -la 0.05 -le 0.001 -f 1
+uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -v 1 -rl 1 -q ./data/saved_model/kdd17_alstm/model -la 0.05 -le 0.001 -f 1
 ```
