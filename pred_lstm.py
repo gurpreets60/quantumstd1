@@ -279,11 +279,11 @@ def run_cfa(summary):
               % len(val_files))
         return
 
-    # Load predictions — take last epoch only, check sample counts match
+    # Load predictions — take last epoch only
     val_preds = {}
     tes_preds = {}
-    val_gt = None
-    tes_gt = None
+    val_gts = {}
+    tes_gts = {}
     for name in val_files:
         vd = np.loadtxt(val_files[name], delimiter=',', skiprows=1)
         td = np.loadtxt(tes_files[name], delimiter=',', skiprows=1)
@@ -293,18 +293,21 @@ def run_cfa(summary):
         td = td[td[:, 0] == last_epoch]
         val_preds[name] = vd[:, 1]
         tes_preds[name] = td[:, 1]
-        if val_gt is None:
-            val_gt = vd[:, 2]
-            tes_gt = td[:, 2]
+        val_gts[name] = vd[:, 2]
+        tes_gts[name] = td[:, 2]
 
-    # Filter to models with matching sample counts
-    n_val = len(val_gt)
-    n_tes = len(tes_gt)
-    usable = [name for name in val_preds
-              if len(val_preds[name]) == n_val and len(tes_preds[name]) == n_tes]
+    # Truncate all predictions to the minimum sample count (first-N aligned)
+    n_val = min(len(v) for v in val_preds.values())
+    n_tes = min(len(v) for v in tes_preds.values())
+    usable = list(val_preds.keys())
+    for name in usable:
+        val_preds[name] = val_preds[name][:n_val]
+        tes_preds[name] = tes_preds[name][:n_tes]
+    val_gt = val_gts[usable[0]][:n_val]
+    tes_gt = tes_gts[usable[0]][:n_tes]
 
     if len(usable) < 2:
-        print('[CFA] Only %d models with matching sample counts — skipping'
+        print('[CFA] Need at least 2 models with predictions, got %d — skipping'
               % len(usable))
         return
 

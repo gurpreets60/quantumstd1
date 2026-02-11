@@ -155,15 +155,14 @@ class QuantumTrainer:
         self.tra_y = tra_y
 
         # Cap val/test samples too (1x cost: fwd only)
+        # Use first-N (not random) so indices align with other models for CFA
         max_eval = max(int(eval_budget / (sec_per_sample * 2)), pilot_n)
         if max_eval < self.val_x.size(0):
-            perm = torch.randperm(self.val_x.size(0))[:max_eval]
-            self.val_x = self.val_x[perm]
-            self.val_y = self.val_y[perm]
+            self.val_x = self.val_x[:max_eval]
+            self.val_y = self.val_y[:max_eval]
         if max_eval < self.tes_x.size(0):
-            perm = torch.randperm(self.tes_x.size(0))[:max_eval]
-            self.tes_x = self.tes_x[perm]
-            self.tes_y = self.tes_y[perm]
+            self.tes_x = self.tes_x[:max_eval]
+            self.tes_y = self.tes_y[:max_eval]
 
         n_qubits = qlstm_input + hidden_size
         print(f'[QUANTUM LSTM] {n_qubits} qubits, depth={vqc_depth}, '
