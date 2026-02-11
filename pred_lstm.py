@@ -20,9 +20,7 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 
-import sys
-sys.path.insert(0, os.path.expanduser('~/projects/quantumfusion/inital_code/unified_cfa'))
-import cfa as unified_cfa
+from models import cfa as unified_cfa
 
 import pandas as pd
 from rich.console import Console

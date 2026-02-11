@@ -25,14 +25,6 @@ uv pip install --python .venv/bin/python \
     tensorflow tf-keras scikit-learn scipy numpy \
     psutil rich pennylane torch pandas
 
-# Clone CFA module if not present
-CFA_DIR="$HOME/projects/quantumfusion/inital_code/unified_cfa"
-if [ ! -f "$CFA_DIR/cfa.py" ]; then
-    echo ""
-    echo "WARNING: CFA module not found at $CFA_DIR/cfa.py"
-    echo "CFA fusion will fail. Place cfa.py at the path above."
-fi
-
 echo ""
 echo "=== Setup complete ==="
 echo "Run: uv run --python .venv/bin/python pred_lstm.py -o train --sklearn 1 -qe 1 -e 1 --time_limit 30"
