@@ -561,7 +561,7 @@ if __name__ == '__main__':
         'lr': 'LOGISTIC REGRESSION',
         'sgdlog': 'SGD LOG', 'sgdhinge': 'SGD HINGE',
         'pa': 'PASSIVE AGGRESSIVE', 'ridge': 'RIDGE', 'perc': 'PERCEPTRON',
-        'lda': 'LDA', 'qda': 'QDA', 'gnb': 'GAUSSIAN NB',
+        'lda': 'LDA', 'gnb': 'GAUSSIAN NB',
         'nc': 'NEAREST CENTROID', 'dt': 'DECISION TREE',
         'et': 'EXTRA TREES', 'ada': 'ADABOOST',
         'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
@@ -577,7 +577,7 @@ if __name__ == '__main__':
         args.qlstm_epoch = 0
         args.epoch = 0
         
-        if key in ('rf','gb','mlp','lr','sgdlog','sgdhinge','pa','ridge','perc','lda','qda','gnb','nc','dt','et','ada'):
+        if key in ('rf','gb','mlp','lr','sgdlog','sgdhinge','pa','ridge','perc','lda','gnb','nc','dt','et','ada'):
            args.sklearn = 1
 
 
@@ -658,7 +658,7 @@ if __name__ == '__main__':
            for sk_name in [
                'RANDOM FOREST', 'GRADIENT BOOST', 'MLP CLASSIFIER', 'LOGISTIC REGRESSION',
                'SGD LOG', 'SGD HINGE', 'PASSIVE AGGRESSIVE', 'RIDGE', 'PERCEPTRON',
-               'LDA', 'QDA', 'GAUSSIAN NB', 'NEAREST CENTROID',
+               'LDA', 'GAUSSIAN NB', 'NEAREST CENTROID',
                'DECISION TREE', 'EXTRA TREES', 'ADABOOST',
                  ]:
                if not only_name or sk_name == only_name:
@@ -707,7 +707,7 @@ if __name__ == '__main__':
     ('RIDGE', RidgeTrainer),
     ('PERCEPTRON', PerceptronTrainer),
     ('LDA', LDATrainer),
-    ('QDA', QDATrainer),
+    
     ('GAUSSIAN NB', GaussianNBTrainer),
     ('NEAREST CENTROID', NearestCentroidTrainer),
     ('DECISION TREE', DecisionTreeTrainer),
