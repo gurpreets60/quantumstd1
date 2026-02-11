@@ -638,6 +638,8 @@ class AWLSTM:
             'acc': 0, 'mcc': -2
         }
 
+        all_val_rows = []
+        all_tes_rows = []
         monitor = SystemMonitor(model_name='CLASSICAL ALSTM', total_epochs=self.epochs, summary=summary)
         if summary:
             summary.start_model('CLASSICAL ALSTM')
@@ -729,6 +731,11 @@ class AWLSTM:
             monitor.log('\tTest per: %s \tTest loss: %s' % (
                 cur_test_perf, test_loss))
 
+            epoch_col = np.full((val_pre.shape[0], 1), i)
+            all_val_rows.append(np.hstack([epoch_col, val_pre, self.val_gt]))
+            epoch_col = np.full((tes_pre.shape[0], 1), i)
+            all_tes_rows.append(np.hstack([epoch_col, tes_pre, self.tes_gt]))
+
             if cur_valid_perf['acc'] > best_valid_perf['acc']:
                 best_valid_perf = copy.copy(cur_valid_perf)
                 best_valid_pred = copy.copy(val_pre)
@@ -747,6 +754,9 @@ class AWLSTM:
         print('\t[CLASSICAL ALSTM] Best Test performance:', best_test_perf)
         if summary:
             summary.finish_model('CLASSICAL ALSTM', best_valid_perf, best_test_perf, time() - train_t0)
+            if all_val_rows:
+                summary.save_predictions('CLASSICAL ALSTM', 'val', np.vstack(all_val_rows))
+                summary.save_predictions('CLASSICAL ALSTM', 'test', np.vstack(all_tes_rows))
         sess.close()
         tf.reset_default_graph()
         if tune_para:

@@ -1,5 +1,7 @@
 import csv
 from datetime import datetime, timedelta
+import io
+import numpy as np
 import os
 import psutil
 import subprocess
@@ -109,9 +111,10 @@ class RunSummary:
     def __init__(self):
         self._console = Console()
         self._models = []
-        self._csv_path = os.path.join(
-            'data', 'results_%s.csv' % datetime.now().strftime('%Y%m%d_%H%M%S')
-        )
+        self._timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.run_dir = os.path.join('data', 'run_%s' % self._timestamp)
+        os.makedirs(self.run_dir, exist_ok=True)
+        self._csv_path = os.path.join(self.run_dir, 'results.csv')
 
     def add_model(self, name, epochs):
         self._models.append({
@@ -135,6 +138,35 @@ class RunSummary:
                 m['test_mcc'] = '%.4f' % test_perf.get('mcc', 0)
                 m['time'] = '%.1fs' % elapsed
         self._save_csv()
+
+    def predictions_path(self, model_name, split):
+        safe_name = model_name.replace(' ', '_')
+        return os.path.join(self.run_dir, 'pred_%s_%s.csv' % (safe_name, split))
+
+    def save_predictions(self, model_name, split, data):
+        """Save predictions to CSV, splitting into numbered files if over 99 MB."""
+        path = self.predictions_path(model_name, split)
+        header = 'epoch,prediction,ground_truth'
+        max_bytes = 99 * 1024 * 1024
+
+        # Estimate total size from a single row
+        buf = io.BytesIO()
+        np.savetxt(buf, data[:1], delimiter=',', header=header, comments='')
+        header_bytes = len(header.encode()) + 1
+        row_bytes = buf.tell() - header_bytes
+        total_est = header_bytes + row_bytes * data.shape[0]
+
+        if total_est <= max_bytes:
+            np.savetxt(path, data, delimiter=',', header=header, comments='')
+            return
+
+        # Split into chunks
+        rows_per_file = max(int((max_bytes - header_bytes) / row_bytes), 1)
+        base, ext = os.path.splitext(path)
+        for idx, start in enumerate(range(0, data.shape[0], rows_per_file), 1):
+            chunk_path = '%s_%03d%s' % (base, idx, ext)
+            np.savetxt(chunk_path, data[start:start + rows_per_file],
+                       delimiter=',', header=header, comments='')
 
     def _save_csv(self):
         header = ['model', 'status', 'epochs', 'val_acc', 'val_mcc',

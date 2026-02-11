@@ -143,7 +143,7 @@ if __name__ == '__main__':
 
         print()
         summary.print()
-        print('Results saved to: %s' % os.path.abspath(summary._csv_path))
+        print('Run saved to: %s' % os.path.abspath(summary.run_dir))
     elif args.action == 'test':
         pure_LSTM.test()
     elif args.action == 'report':

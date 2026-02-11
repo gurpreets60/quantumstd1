@@ -186,6 +186,8 @@ class QuantumTrainer:
         monitor = SystemMonitor(model_name='QUANTUM LSTM', total_epochs=self.epochs, summary=summary)
         best_valid_perf = {'acc': 0, 'mcc': -2}
         best_test_perf = {'acc': 0, 'mcc': -2}
+        all_val_rows = []
+        all_tes_rows = []
         train_t0 = time()
 
         monitor.start()
@@ -230,6 +232,11 @@ class QuantumTrainer:
             tes_perf = self._eval_perf(tes_pred, self.tes_y.numpy())
             monitor.log('\tTest per: %s' % tes_perf)
 
+            epoch_col = np.full((val_pred.shape[0], 1), epoch)
+            all_val_rows.append(np.hstack([epoch_col, val_pred, self.val_y.numpy()]))
+            epoch_col = np.full((tes_pred.shape[0], 1), epoch)
+            all_tes_rows.append(np.hstack([epoch_col, tes_pred, self.tes_y.numpy()]))
+
             if val_perf['acc'] > best_valid_perf['acc']:
                 best_valid_perf = copy.copy(val_perf)
                 best_test_perf = copy.copy(tes_perf)
@@ -243,4 +250,7 @@ class QuantumTrainer:
         print('\t[QUANTUM LSTM] Best Test performance:', best_test_perf)
         if summary:
             summary.finish_model('QUANTUM LSTM', best_valid_perf, best_test_perf, time() - train_t0)
+            if all_val_rows:
+                summary.save_predictions('QUANTUM LSTM', 'val', np.vstack(all_val_rows))
+                summary.save_predictions('QUANTUM LSTM', 'test', np.vstack(all_tes_rows))
         return best_valid_perf, best_test_perf
