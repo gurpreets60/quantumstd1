@@ -20,6 +20,11 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 
+import sys
+sys.path.insert(0, os.path.expanduser('~/projects/quantumfusion/inital_code/unified_cfa'))
+import cfa as unified_cfa
+
+import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
@@ -248,6 +253,97 @@ class TimeGuard:
 
 
 # ---------------------------------------------------------------------------
+# CFA combination of model predictions
+# ---------------------------------------------------------------------------
+
+def run_cfa(summary):
+    """Load predictions from the run directory and fuse them with CFA."""
+    run_dir = summary.run_dir
+    console = Console()
+
+    # Discover models that have prediction files
+    val_files = {}
+    tes_files = {}
+    for m in summary._models:
+        name = m['name']
+        if m['status'] != 'DONE' or m['val_acc'] == '0.0000':
+            continue  # skip killed models
+        val_path = summary.predictions_path(name, 'val')
+        tes_path = summary.predictions_path(name, 'test')
+        if os.path.exists(val_path) and os.path.exists(tes_path):
+            val_files[name] = val_path
+            tes_files[name] = tes_path
+
+    if len(val_files) < 2:
+        print('[CFA] Need at least 2 models with predictions, got %d — skipping'
+              % len(val_files))
+        return
+
+    # Load predictions — take last epoch only, check sample counts match
+    val_preds = {}
+    tes_preds = {}
+    val_gt = None
+    tes_gt = None
+    for name in val_files:
+        vd = np.loadtxt(val_files[name], delimiter=',', skiprows=1)
+        td = np.loadtxt(tes_files[name], delimiter=',', skiprows=1)
+        # Last epoch
+        last_epoch = int(vd[:, 0].max())
+        vd = vd[vd[:, 0] == last_epoch]
+        td = td[td[:, 0] == last_epoch]
+        val_preds[name] = vd[:, 1]
+        tes_preds[name] = td[:, 1]
+        if val_gt is None:
+            val_gt = vd[:, 2]
+            tes_gt = td[:, 2]
+
+    # Filter to models with matching sample counts
+    n_val = len(val_gt)
+    n_tes = len(tes_gt)
+    usable = [name for name in val_preds
+              if len(val_preds[name]) == n_val and len(tes_preds[name]) == n_tes]
+
+    if len(usable) < 2:
+        print('[CFA] Only %d models with matching sample counts — skipping'
+              % len(usable))
+        return
+
+    print('\n===== CFA COMBINATION =====')
+    print('[CFA] Combining %d models: %s' % (len(usable), ', '.join(usable)))
+
+    val_df = pd.DataFrame({name: val_preds[name] for name in usable})
+    tes_df = pd.DataFrame({name: tes_preds[name] for name in usable})
+    y_val = (val_gt > 0.5).astype(int)
+    y_tes = (tes_gt > 0.5).astype(int)
+
+    results = unified_cfa.cfa_single_layer(val_df, tes_df, y_val, y_tes,
+                                           metric='accuracy')
+
+    # Show results table
+    results_sorted = results.sort_values('score', ascending=False)
+    table = Table(title='CFA Fusion Results (accuracy)', expand=True)
+    table.add_column('Combination', justify='left')
+    table.add_column('Method', justify='center')
+    table.add_column('Models', justify='center')
+    table.add_column('Score', justify='center')
+    for _, row in results_sorted.head(15).iterrows():
+        table.add_row(
+            str(row['combination']), str(row['method']),
+            str(row['n_models']), '%.4f' % row['score'])
+    console.print(table)
+
+    # Save full results
+    cfa_path = os.path.join(run_dir, 'cfa_results.csv')
+    results_sorted.to_csv(cfa_path, index=False)
+    print('[CFA] Full results saved to: %s' % cfa_path)
+
+    # Best combo
+    best = results_sorted.iloc[0]
+    print('[CFA] Best: %s (%s) = %.4f' % (
+        best['combination'], best['method'], best['score']))
+
+
+# ---------------------------------------------------------------------------
 # Model runner with guards
 # ---------------------------------------------------------------------------
 
@@ -459,6 +555,9 @@ if __name__ == '__main__':
         if args.epoch > 0:
             _run_model('CLASSICAL ALSTM', pure_LSTM.train, summary,
                        args.mem_limit, args.time_limit)
+
+        # CFA combination of all model predictions
+        run_cfa(summary)
 
         print()
         summary.print()
