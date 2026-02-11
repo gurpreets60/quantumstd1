@@ -1,0 +1,15 @@
+"""Nearest Centroid classifier for stock prediction."""
+from sklearn.neighbors import NearestCentroid
+from .sklearn_base import SklearnTrainer
+
+
+class NearestCentroidTrainer(SklearnTrainer):
+    def __init__(self, tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+                 hinge=True, time_budget=0.8):
+        super().__init__(
+            'NEAREST CENTROID',
+            NearestCentroid(metric='euclidean'),
+            tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+            hinge=hinge, time_budget=time_budget
+        )
+
