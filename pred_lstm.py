@@ -9,7 +9,7 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 
-from models import AWLSTM, QuantumTrainer, RunSummary
+from models import AWLSTM, QuantumTrainer, RunSummary, MemoryGuard, OOMTestTrainer
 
 if __name__ == '__main__':
     desc = 'the lstm model'
@@ -66,6 +66,12 @@ if __name__ == '__main__':
                         help='time budget in seconds for quantum LSTM')
     parser.add_argument('-t', '--timeout', type=int, default=0,
                         help='kill script after this many seconds (0=no limit)')
+    parser.add_argument('--test_oom', type=int, default=0,
+                        help='run OOM test model (0=skip, 1=run)')
+    parser.add_argument('--oom_gb', type=float, default=2.0,
+                        help='GB the OOM test model tries to allocate')
+    parser.add_argument('--mem_limit', type=float, default=1.0,
+                        help='per-model RAM limit in GB (0=no limit)')
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -110,17 +116,49 @@ if __name__ == '__main__':
         reload=args.reload
     )
 
+    def _run_model(name, train_fn, summary, mem_limit_gb):
+        """Run a model's train(), wrapped in MemoryGuard if limit > 0."""
+        print('\n===== %s =====' % name)
+        if mem_limit_gb > 0:
+            try:
+                with MemoryGuard(limit_gb=mem_limit_gb):
+                    train_fn(summary=summary)
+            except MemoryError:
+                print('\n[MemoryGuard] %s exceeded %.1f GB limit — KILLED' %
+                      (name, mem_limit_gb))
+                if summary:
+                    summary.finish_model(name, {'acc': 0, 'mcc': 0},
+                                         {'acc': 0, 'mcc': 0}, 0)
+        else:
+            train_fn(summary=summary)
+
     if args.action == 'train':
+        import gc
         summary = RunSummary()
+
+        # Register all models that will run
+        if args.test_oom:
+            summary.add_model('TEST OOM', 1)
         if args.qlstm_epoch > 0:
             summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
         if args.epoch > 0:
             summary.add_model('CLASSICAL ALSTM', args.epoch)
         summary.print()
 
-        # Quantum LSTM first (if epochs > 0)
+        # TEST OOM model (if enabled) — should get killed by MemoryGuard
+        if args.test_oom:
+            oom = OOMTestTrainer(
+                tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
+                val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
+                tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
+                epochs=1, target_gb=args.oom_gb,
+            )
+            _run_model('TEST OOM', oom.train, summary, args.mem_limit)
+            del oom
+            gc.collect()
+
+        # Quantum LSTM (if epochs > 0)
         if args.qlstm_epoch > 0:
-            print('\n===== QUANTUM LSTM =====')
             qt = QuantumTrainer(
                 tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
                 val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
@@ -134,12 +172,14 @@ if __name__ == '__main__':
                 hinge=(args.hinge_lose == 1),
                 time_budget=args.qlstm_time,
             )
-            qt.train(summary=summary)
+            _run_model('QUANTUM LSTM', qt.train, summary, args.mem_limit)
+            del qt
+            gc.collect()
 
-        # Classical ALSTM second
+        # Classical ALSTM
         if args.epoch > 0:
-            print('\n===== CLASSICAL ALSTM =====')
-            pure_LSTM.train(summary=summary)
+            _run_model('CLASSICAL ALSTM', pure_LSTM.train, summary,
+                       args.mem_limit)
 
         print()
         summary.print()

@@ -1,10 +1,13 @@
 import csv
+import ctypes
 from datetime import datetime, timedelta
+import gc
 import io
 import numpy as np
 import os
 import psutil
 import subprocess
+import threading
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -205,3 +208,70 @@ class RunSummary:
 
     def print(self):
         self._console.print(self.build_table())
+
+
+class MemoryGuard:
+    """Enforces a per-model RAM limit. Kills the model if it exceeds it.
+
+    Usage::
+
+        with MemoryGuard(limit_gb=1.0) as guard:
+            model.train(summary=summary)
+        # If model exceeded 1 GB *above baseline*, a MemoryError is raised.
+    """
+
+    def __init__(self, limit_gb=1.0, check_interval=0.25):
+        self.limit_bytes = int(limit_gb * 1024 ** 3)
+        self.limit_gb = limit_gb
+        self.check_interval = check_interval
+        self._proc = psutil.Process()
+        self._baseline = 0
+        self._peak = 0
+        self._exceeded = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        gc.collect()
+        self._baseline = self._proc.memory_info().rss
+        self._peak = self._baseline
+        self._exceeded = False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+        print(f'[MemoryGuard] Baseline RSS: {self._baseline / 1024**2:.0f} MB, '
+              f'limit: +{self.limit_gb:.1f} GB')
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        used_mb = (self._peak - self._baseline) / 1024 ** 2
+        print(f'[MemoryGuard] Peak usage above baseline: {used_mb:.0f} MB')
+        gc.collect()
+        # Don't suppress exceptions — let MemoryError propagate
+        return False
+
+    def _watch(self):
+        main_tid = threading.main_thread().ident
+        while not self._stop.is_set():
+            rss = self._proc.memory_info().rss
+            if rss > self._peak:
+                self._peak = rss
+            used = rss - self._baseline
+            if used > self.limit_bytes:
+                self._exceeded = True
+                print(f'\n[MemoryGuard] KILLED: model used '
+                      f'{used / 1024**3:.2f} GB (limit: {self.limit_gb:.1f} GB)')
+                # Inject MemoryError into the main thread
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(main_tid),
+                    ctypes.py_object(MemoryError),
+                )
+                break
+            self._stop.wait(self.check_interval)
+
+    @property
+    def exceeded(self):
+        return self._exceeded
