@@ -23,7 +23,8 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
 from rich.console import Console
 from rich.table import Table
 
-from models import AWLSTM, QuantumTrainer, OOMTestTrainer
+from models import (AWLSTM, QuantumTrainer, OOMTestTrainer,
+                     RandomForestTrainer, GradientBoostTrainer, MLPTrainer)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +342,8 @@ if __name__ == '__main__':
                         help='per-model RAM limit in GB (0=no limit)')
     parser.add_argument('--time_limit', type=float, default=1.0,
                         help='per-model time limit in seconds (0=no limit)')
+    parser.add_argument('--sklearn', type=int, default=0,
+                        help='run sklearn models: random forest, gradient boost, mlp (0=skip, 1=run)')
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -391,6 +394,10 @@ if __name__ == '__main__':
         # Register all models that will run
         if args.test_oom:
             summary.add_model('TEST OOM', 1)
+        if args.sklearn:
+            summary.add_model('RANDOM FOREST', 1)
+            summary.add_model('GRADIENT BOOST', 1)
+            summary.add_model('MLP CLASSIFIER', 1)
         if args.qlstm_epoch > 0:
             summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
         if args.epoch > 0:
@@ -409,6 +416,24 @@ if __name__ == '__main__':
                        args.time_limit)
             del oom
             gc.collect()
+
+        # Sklearn models
+        if args.sklearn:
+            hinge = (args.hinge_lose == 1)
+            data_args = dict(
+                tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
+                val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
+                tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
+                hinge=hinge,
+            )
+            for name, cls in [('RANDOM FOREST', RandomForestTrainer),
+                               ('GRADIENT BOOST', GradientBoostTrainer),
+                               ('MLP CLASSIFIER', MLPTrainer)]:
+                trainer = cls(**data_args)
+                _run_model(name, trainer.train, summary, args.mem_limit,
+                           args.time_limit)
+                del trainer
+                gc.collect()
 
         # Quantum LSTM (if epochs > 0)
         if args.qlstm_epoch > 0:
