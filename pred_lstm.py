@@ -1,8 +1,9 @@
 import argparse
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import os
+import signal
 import pathlib
 os.environ['TF_USE_LEGACY_KERAS'] = '1'
 # Auto-detect pip-installed NVIDIA CUDA libs for GPU support
@@ -10,6 +11,7 @@ _nvidia_dir = pathlib.Path(__file__).resolve().parent / '.venv' / 'lib'
 for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
+import pennylane as qml
 import psutil
 import random
 from rich.console import Console
@@ -21,15 +23,22 @@ import subprocess
 import tensorflow.compat.v1 as tf
 tf.disable_eager_execution()
 from time import time
+import torch
+import torch.nn as nn
 
 
 class SystemMonitor:
-    def __init__(self):
+    def __init__(self, model_name='', total_epochs=0):
         psutil.cpu_percent(interval=None)
         self._has_gpu = self._check_gpu()
         self._console = Console()
         self._live = Live(console=self._console, refresh_per_second=4)
         self._phase = ''
+        self._model_name = model_name
+        self._total_epochs = total_epochs
+        self._current_epoch = 0
+        self._epoch_times = []
+        self._train_start = None
 
     def _check_gpu(self):
         try:
@@ -55,18 +64,30 @@ class SystemMonitor:
         except Exception:
             return 'N/A', '', ''
 
+    def _format_eta(self):
+        if not self._epoch_times or self._current_epoch >= self._total_epochs:
+            return 'N/A'
+        avg_time = sum(self._epoch_times) / len(self._epoch_times)
+        remaining = self._total_epochs - self._current_epoch
+        eta_secs = avg_time * remaining
+        eta = str(timedelta(seconds=int(eta_secs)))
+        return eta
+
     def _build_table(self):
         mem = psutil.virtual_memory()
         ram_used = mem.used / (1024 ** 3)
         ram_total = mem.total / (1024 ** 3)
         cpu = psutil.cpu_percent(interval=None)
         gpu_util, gpu_used, gpu_total = self._gpu_stats()
+        eta = self._format_eta()
 
-        table = Table(title=self._phase, expand=True)
+        title = f'{self._model_name} | {self._phase}'
+        table = Table(title=title, expand=True)
         table.add_column('RAM', justify='center')
         table.add_column('CPU', justify='center')
         table.add_column('GPU', justify='center')
         table.add_column('VRAM', justify='center')
+        table.add_column('ETA', justify='center')
 
         vram = f'{gpu_used}/{gpu_total}' if gpu_used else 'N/A'
         table.add_row(
@@ -74,14 +95,20 @@ class SystemMonitor:
             f'{cpu}%',
             gpu_util,
             vram,
+            eta,
         )
         return table
 
     def start(self):
+        self._train_start = time()
         self._live.start()
 
     def stop(self):
         self._live.stop()
+
+    def epoch_done(self, epoch, epoch_time):
+        self._current_epoch = epoch + 1
+        self._epoch_times.append(epoch_time)
 
     def update(self, phase):
         self._phase = phase
@@ -89,6 +116,230 @@ class SystemMonitor:
 
     def log(self, message):
         self._live.console.print(message, highlight=False)
+
+
+# ---------------------------------------------------------------------------
+# Quantum LSTM (PennyLane + PyTorch)
+# ---------------------------------------------------------------------------
+
+def _qlstm_h_layer(nqubits):
+    for idx in range(nqubits):
+        qml.Hadamard(wires=idx)
+
+def _qlstm_ry_layer(w):
+    for idx, element in enumerate(w):
+        qml.RY(element, wires=idx)
+
+def _qlstm_entangling_layer(nqubits):
+    for i in range(0, nqubits - 1, 2):
+        qml.CNOT(wires=[i, i + 1])
+    for i in range(1, nqubits - 1, 2):
+        qml.CNOT(wires=[i, i + 1])
+
+def _qlstm_circuit(x, q_weights, n_class):
+    n_dep = q_weights.shape[0]
+    n_qub = q_weights.shape[1]
+    _qlstm_h_layer(n_qub)
+    _qlstm_ry_layer(x)
+    for k in range(n_dep):
+        _qlstm_entangling_layer(n_qub)
+        _qlstm_ry_layer(q_weights[k])
+    return [qml.expval(qml.PauliZ(p)) for p in range(n_class)]
+
+
+class VQC(nn.Module):
+    def __init__(self, vqc_depth, n_qubits, n_class):
+        super().__init__()
+        self.weights = nn.Parameter(0.01 * torch.randn(vqc_depth, n_qubits))
+        self.dev = qml.device('default.qubit', wires=n_qubits)
+        self.circuit = qml.QNode(_qlstm_circuit, self.dev, interface='torch')
+        self.n_class = n_class
+
+    def forward(self, X):
+        return torch.stack([
+            torch.stack(self.circuit(x, self.weights, self.n_class)) for x in X
+        ])
+
+
+class QLSTMCell(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, vqc_depth):
+        super().__init__()
+        self.hidden_size = hidden_size
+        n_qubits = input_size + hidden_size
+        self.input_gate = VQC(vqc_depth, n_qubits, hidden_size)
+        self.forget_gate = VQC(vqc_depth, n_qubits, hidden_size)
+        self.cell_gate = VQC(vqc_depth, n_qubits, hidden_size)
+        self.output_gate = VQC(vqc_depth, n_qubits, hidden_size)
+        self.output_fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x, hidden):
+        h_prev, c_prev = hidden
+        combined = torch.cat((x, h_prev), dim=1)
+        i_t = torch.sigmoid(self.input_gate(combined))
+        f_t = torch.sigmoid(self.forget_gate(combined))
+        g_t = torch.tanh(self.cell_gate(combined))
+        o_t = torch.sigmoid(self.output_gate(combined))
+        c_t = f_t * c_prev + i_t * g_t
+        h_t = o_t * torch.tanh(c_t)
+        out = self.output_fc(h_t)
+        return out, h_t, c_t
+
+
+class QLSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, vqc_depth, qlstm_input=2):
+        super().__init__()
+        self.hidden_size = hidden_size
+        # Compress high-dim features down to qlstm_input before quantum circuit
+        self.compress = nn.Linear(input_size, qlstm_input)
+        self.cell = QLSTMCell(qlstm_input, hidden_size, output_size, vqc_depth)
+
+    def forward(self, x, hidden=None):
+        batch_size, seq_len, _ = x.size()
+        x = self.compress(x)
+        if hidden is None:
+            h_t = torch.zeros(batch_size, self.hidden_size, dtype=x.dtype, device=x.device)
+            c_t = torch.zeros(batch_size, self.hidden_size, dtype=x.dtype, device=x.device)
+        else:
+            h_t, c_t = hidden
+        outputs = []
+        for t in range(seq_len):
+            out, h_t, c_t = self.cell(x[:, t, :], (h_t, c_t))
+            outputs.append(out.unsqueeze(1))
+        return torch.cat(outputs, dim=1), (h_t, c_t)
+
+
+class QuantumTrainer:
+    """Train a QLSTM on the same stock data used by the classical AWLSTM."""
+
+    def __init__(self, tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+                 hidden_size=2, vqc_depth=1, qlstm_input=2, epochs=10,
+                 batch_size=256, lr=0.01, hinge=True, time_budget=10.0):
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.hinge = hinge
+        self.time_budget = time_budget
+
+        input_size = tra_pv.shape[2]
+        self.model = QLSTMModel(input_size, hidden_size, 1, vqc_depth,
+                                qlstm_input=qlstm_input).double()
+        self.optimizer = torch.optim.RMSprop(self.model.parameters(), lr=lr)
+        self.loss_fn = nn.MSELoss()
+
+        # Convert data
+        tra_x = torch.from_numpy(tra_pv).double()
+        tra_y = torch.from_numpy(tra_gt).double()
+        self.val_x = torch.from_numpy(val_pv).double()
+        self.val_y = torch.from_numpy(val_gt).double()
+        self.tes_x = torch.from_numpy(tes_pv).double()
+        self.tes_y = torch.from_numpy(tes_gt).double()
+
+        # Auto-calibrate: time a pilot of 2 samples, then cap all sets
+        pilot_n = min(2, tra_x.size(0))
+        self.model.eval()
+        with torch.no_grad():
+            t0 = time()
+            self.model(tra_x[:pilot_n])
+            pilot_sec = time() - t0
+        sec_per_sample = pilot_sec / pilot_n
+
+        # Budget per epoch: split between train (50%), val+test (50%)
+        per_epoch_budget = self.time_budget / max(self.epochs, 1)
+        eval_budget = per_epoch_budget * 0.5
+        train_budget = per_epoch_budget * 0.5
+
+        # Cap training samples (3x cost: fwd + bwd + optim)
+        max_train = max(int(train_budget / (sec_per_sample * 3)), pilot_n)
+        if max_train < tra_x.size(0):
+            tra_x = tra_x[torch.randperm(tra_x.size(0))[:max_train]]
+            tra_y = tra_y[:max_train]
+        self.tra_x = tra_x
+        self.tra_y = tra_y
+
+        # Cap val/test samples too (1x cost: fwd only)
+        max_eval = max(int(eval_budget / (sec_per_sample * 2)), pilot_n)
+        if max_eval < self.val_x.size(0):
+            perm = torch.randperm(self.val_x.size(0))[:max_eval]
+            self.val_x = self.val_x[perm]
+            self.val_y = self.val_y[perm]
+        if max_eval < self.tes_x.size(0):
+            perm = torch.randperm(self.tes_x.size(0))[:max_eval]
+            self.tes_x = self.tes_x[perm]
+            self.tes_y = self.tes_y[perm]
+
+        n_qubits = qlstm_input + hidden_size
+        print(f'[QUANTUM LSTM] {n_qubits} qubits, depth={vqc_depth}, '
+              f'compress {input_size}->{qlstm_input}, '
+              f'~{sec_per_sample:.4f}s/sample, '
+              f'using {self.tra_x.size(0)}/{tra_pv.shape[0]} train samples')
+
+    def _eval_perf(self, pred_np, gt_np):
+        if self.hinge:
+            binary_pred = np.where(pred_np > 0.5, 1.0, 0.0)
+        else:
+            binary_pred = np.round(pred_np)
+        acc = accuracy_score(gt_np, binary_pred)
+        mcc = matthews_corrcoef(gt_np, binary_pred)
+        return {'acc': acc, 'mcc': mcc}
+
+    def train(self):
+        monitor = SystemMonitor(model_name='QUANTUM LSTM', total_epochs=self.epochs)
+        best_valid_perf = {'acc': 0, 'mcc': -2}
+        best_test_perf = {'acc': 0, 'mcc': -2}
+
+        monitor.start()
+        for epoch in range(self.epochs):
+            t1 = time()
+            monitor.update(f'Training batches (epoch {epoch}/{self.epochs})')
+
+            # Training
+            self.model.train()
+            perm = torch.randperm(self.tra_x.size(0))
+            tra_x_shuf = self.tra_x[perm]
+            tra_y_shuf = self.tra_y[perm]
+            epoch_loss = 0.0
+            n_batches = 0
+            for start in range(0, tra_x_shuf.size(0), self.batch_size):
+                xb = tra_x_shuf[start:start + self.batch_size]
+                yb = tra_y_shuf[start:start + self.batch_size]
+                self.optimizer.zero_grad()
+                out, _ = self.model(xb)
+                loss = self.loss_fn(out[:, -1, :], yb)
+                loss.backward()
+                self.optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
+            avg_loss = epoch_loss / max(n_batches, 1)
+            monitor.log('----->>>>> Training loss: %.6f' % avg_loss)
+
+            # Validation
+            monitor.update('Evaluating validation set')
+            self.model.eval()
+            with torch.no_grad():
+                val_out, _ = self.model(self.val_x)
+                val_pred = val_out[:, -1, :].numpy()
+            val_perf = self._eval_perf(val_pred, self.val_y.numpy())
+            monitor.log('\tVal per: %s' % val_perf)
+
+            # Test
+            monitor.update('Evaluating test set')
+            with torch.no_grad():
+                tes_out, _ = self.model(self.tes_x)
+                tes_pred = tes_out[:, -1, :].numpy()
+            tes_perf = self._eval_perf(tes_pred, self.tes_y.numpy())
+            monitor.log('\tTest per: %s' % tes_perf)
+
+            if val_perf['acc'] > best_valid_perf['acc']:
+                best_valid_perf = copy.copy(val_perf)
+                best_test_perf = copy.copy(tes_perf)
+
+            t4 = time()
+            monitor.epoch_done(epoch, t4 - t1)
+            monitor.log('epoch: %d time: %.4f' % (epoch, t4 - t1))
+
+        monitor.stop()
+        print('\n[QUANTUM LSTM] Best Valid performance:', best_valid_perf)
+        print('\t[QUANTUM LSTM] Best Test performance:', best_test_perf)
+        return best_valid_perf, best_test_perf
 
 
 def load_cla_data(data_path, tra_date, val_date, tes_date, seq=2,
@@ -717,7 +968,7 @@ class AWLSTM:
             'acc': 0, 'mcc': -2
         }
 
-        monitor = SystemMonitor()
+        monitor = SystemMonitor(model_name='CLASSICAL ALSTM', total_epochs=self.epochs)
         bat_count = self.tra_pv.shape[0] // self.batch_size
         if not (self.tra_pv.shape[0] % self.batch_size == 0):
             bat_count += 1
@@ -816,10 +1067,11 @@ class AWLSTM:
                 self.tra_pv, self.tra_wd, self.tra_gt, random_state=0
             )
             t4 = time()
+            monitor.epoch_done(i, t4 - t1)
             monitor.log('epoch: %d time: %.4f' % (i, t4 - t1))
         monitor.stop()
-        print('\nBest Valid performance:', best_valid_perf)
-        print('\tBest Test performance:', best_test_perf)
+        print('\n[CLASSICAL ALSTM] Best Valid performance:', best_valid_perf)
+        print('\t[CLASSICAL ALSTM] Best Test performance:', best_test_perf)
         sess.close()
         tf.reset_default_graph()
         if tune_para:
@@ -884,7 +1136,27 @@ if __name__ == '__main__':
                         help='use hinge lose')
     parser.add_argument('-rl', '--reload', type=int, default=0,
                         help='use pre-trained parameters')
+    parser.add_argument('-qd', '--qlstm_depth', type=int, default=1,
+                        help='VQC depth for quantum LSTM')
+    parser.add_argument('-qh', '--qlstm_hidden', type=int, default=2,
+                        help='hidden size for quantum LSTM')
+    parser.add_argument('-qi', '--qlstm_input', type=int, default=2,
+                        help='compressed input dim for quantum LSTM')
+    parser.add_argument('-qe', '--qlstm_epoch', type=int, default=0,
+                        help='quantum LSTM epochs (0 to skip)')
+    parser.add_argument('-qt', '--qlstm_time', type=float, default=10.0,
+                        help='time budget in seconds for quantum LSTM')
+    parser.add_argument('-t', '--timeout', type=int, default=0,
+                        help='kill script after this many seconds (0=no limit)')
     args = parser.parse_args()
+
+    if args.timeout > 0:
+        def _timeout_handler(signum, frame):
+            print('\n\nTIMEOUT: script exceeded %d seconds, exiting.' % args.timeout)
+            os._exit(1)
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(args.timeout)
+
     print(args)
 
     parameters = {
@@ -921,6 +1193,26 @@ if __name__ == '__main__':
     )
 
     if args.action == 'train':
+        # Quantum LSTM first (if epochs > 0)
+        if args.qlstm_epoch > 0:
+            print('\n===== QUANTUM LSTM =====')
+            qt = QuantumTrainer(
+                tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
+                val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
+                tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
+                hidden_size=args.qlstm_hidden,
+                vqc_depth=args.qlstm_depth,
+                qlstm_input=args.qlstm_input,
+                epochs=args.qlstm_epoch,
+                batch_size=args.batch_size,
+                lr=args.learning_rate,
+                hinge=(args.hinge_lose == 1),
+                time_budget=args.qlstm_time,
+            )
+            qt.train()
+
+        # Classical ALSTM second
+        print('\n===== CLASSICAL ALSTM =====')
         pure_LSTM.train()
     elif args.action == 'test':
         pure_LSTM.test()
