@@ -57,7 +57,7 @@ data/run_YYYYMMDD_HHMMSS/
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--sklearn` | Run sklearn models: Random Forest, Gradient Boosting, MLP (0/1) | `0` |
+| `--sklearn` | Run sklearn models: RF, GB, MLP, LR (0/1) | `0` |
 
 Sklearn models auto-calibrate training set size via a pilot fit to stay within
 their time budget (0.8s by default). They flatten the 3D stock data to 2D for
@@ -106,6 +106,7 @@ Use `-m` / `--model` to run just one model (default: `all`):
 | `rf` | Random Forest |
 | `gb` | Gradient Boosting |
 | `mlp` | MLP Classifier |
+| `lr` | Logistic Regression |
 | `quantum` | Quantum LSTM |
 | `classical` | Classical ALSTM |
 | `oom` | OOM Test |
@@ -196,3 +197,101 @@ uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 
 ```bash
 uv run --python .venv/bin/python pred_lstm.py -p ./data/kdd17/ourpped/ -l 15 -u 16 -l2 0.001 -v 1 -rl 1 -q ./data/saved_model/kdd17_alstm/model -la 0.05 -le 0.001 -f 1
 ```
+
+## How to Add a New Model
+
+Every model must finish within the **1 GB RAM** and **1 second time** limits or
+it gets killed. The `SklearnTrainer` base class handles most of the work — it
+auto-calibrates the training set size by timing a pilot fit.
+
+### Step-by-step
+
+**1. Create `models/your_model.py`**
+
+```python
+"""Your Model classifier for stock prediction."""
+from sklearn.your_module import YourClassifier
+from .sklearn_base import SklearnTrainer
+
+
+class YourModelTrainer(SklearnTrainer):
+    def __init__(self, tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+                 hinge=True, time_budget=0.8):
+        super().__init__(
+            'YOUR MODEL',                          # display name
+            YourClassifier(param=value),            # sklearn estimator
+            tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+            hinge=hinge, time_budget=time_budget)
+```
+
+**2. Export it in `models/__init__.py`**
+
+```python
+from .your_model import YourModelTrainer
+```
+
+**3. Wire it into `pred_lstm.py`** — 4 edits:
+
+```python
+# (a) Import
+from models import (..., YourModelTrainer)
+
+# (b) Add to _MODEL_MAP (pick a short key)
+_MODEL_MAP = {
+    ...,
+    'ym': 'YOUR MODEL',
+}
+
+# (c) Add key to the sklearn key list
+if key in ('rf', 'gb', 'mlp', 'lr', 'ym'):
+
+# (d) Add to the sklearn registration list and run loop
+for sk_name in ['RANDOM FOREST', ..., 'YOUR MODEL']:
+...
+for name, cls in [('RANDOM FOREST', RandomForestTrainer),
+                   ...,
+                   ('YOUR MODEL', YourModelTrainer)]:
+```
+
+**4. Test it**
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o train -m ym --time_limit 1 --mem_limit 1
+```
+
+### Fitting within 1s / 1GB limits
+
+The `SklearnTrainer` base class automatically subsamples training data to fit
+the time budget. But if your model is still too slow or uses too much RAM:
+
+| Problem | Fix |
+|---------|-----|
+| Killed by TimeGuard | Reduce complexity: fewer estimators (`n_estimators=20`), shallower trees (`max_depth=3`), fewer iterations (`max_iter=50`) |
+| Killed by MemoryGuard | Use lighter model, reduce `n_estimators`, set `max_depth`, avoid algorithms that build large internal structures (e.g. KNN with large k) |
+| Pilot fit alone takes >0.5s | The base class only uses 50 samples for pilot — if that's too slow, simplify the estimator or use a faster solver |
+| MLP convergence warning | Lower `max_iter` or use a simpler architecture (`hidden_layer_sizes=(16,)`) |
+
+**Rule of thumb**: start with minimal parameters, test with `-m ym --time_limit 1`,
+and increase complexity only while it still passes. The auto-calibration will
+subsample training data as needed, so low `n_estimators` / `max_depth` /
+`max_iter` is the main lever.
+
+### Example: Logistic Regression (simplest possible model)
+
+`models/logistic_regression.py` — 8 lines total:
+
+```python
+from sklearn.linear_model import LogisticRegression
+from .sklearn_base import SklearnTrainer
+
+class LogisticRegressionTrainer(SklearnTrainer):
+    def __init__(self, tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+                 hinge=True, time_budget=0.8):
+        super().__init__(
+            'LOGISTIC REGRESSION',
+            LogisticRegression(max_iter=100, solver='lbfgs', random_state=42),
+            tra_pv, tra_gt, val_pv, val_gt, tes_pv, tes_gt,
+            hinge=hinge, time_budget=time_budget)
+```
+
+Runs in 0.2s, 0 MB above baseline — well within limits.
