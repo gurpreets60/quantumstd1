@@ -5,6 +5,7 @@ import ctypes
 from datetime import datetime
 import gc
 import io
+import itertools
 import numpy as np
 import os
 import pathlib
@@ -255,30 +256,42 @@ class TimeGuard:
 # CFA combination of model predictions
 # ---------------------------------------------------------------------------
 
-def run_cfa(summary):
-    """Load predictions from the run directory and fuse them with CFA."""
-    run_dir = summary.run_dir
-    console = Console()
+def _load_predictions(run_dir, summary=None):
+    """Discover and load prediction CSVs from a run directory.
 
-    # Discover models that have prediction files
+    Works with a RunSummary (skips killed models) or standalone (scans files).
+    Returns (val_preds, tes_preds, val_gt, tes_gt, usable) or None if < 2 models.
+    """
+    import glob as globmod
+
     val_files = {}
     tes_files = {}
-    for m in summary._models:
-        name = m['name']
-        if m['status'] != 'DONE' or m['val_acc'] == '0.0000':
-            continue  # skip killed models
-        val_path = summary.predictions_path(name, 'val')
-        tes_path = summary.predictions_path(name, 'test')
-        if os.path.exists(val_path) and os.path.exists(tes_path):
-            val_files[name] = val_path
-            tes_files[name] = tes_path
+
+    if summary:
+        for m in summary._models:
+            name = m['name']
+            if m['status'] != 'DONE' or m['val_acc'] == '0.0000':
+                continue
+            val_path = summary.predictions_path(name, 'val')
+            tes_path = summary.predictions_path(name, 'test')
+            if os.path.exists(val_path) and os.path.exists(tes_path):
+                val_files[name] = val_path
+                tes_files[name] = tes_path
+    else:
+        # Standalone: scan for pred_*_val.csv / pred_*_test.csv
+        for vp in sorted(globmod.glob(os.path.join(run_dir, 'pred_*_val.csv'))):
+            base = os.path.basename(vp)
+            name = base.replace('pred_', '').replace('_val.csv', '').replace('_', ' ')
+            tp = vp.replace('_val.csv', '_test.csv')
+            if os.path.exists(tp):
+                val_files[name] = vp
+                tes_files[name] = tp
 
     if len(val_files) < 2:
         print('[CFA] Need at least 2 models with predictions, got %d — skipping'
               % len(val_files))
-        return
+        return None
 
-    # Load predictions — take last epoch only
     val_preds = {}
     tes_preds = {}
     val_gts = {}
@@ -286,7 +299,6 @@ def run_cfa(summary):
     for name in val_files:
         vd = np.loadtxt(val_files[name], delimiter=',', skiprows=1)
         td = np.loadtxt(tes_files[name], delimiter=',', skiprows=1)
-        # Last epoch
         last_epoch = int(vd[:, 0].max())
         vd = vd[vd[:, 0] == last_epoch]
         td = td[td[:, 0] == last_epoch]
@@ -295,40 +307,118 @@ def run_cfa(summary):
         val_gts[name] = vd[:, 2]
         tes_gts[name] = td[:, 2]
 
-    # Truncate all predictions to the minimum sample count (first-N aligned)
     n_val = min(len(v) for v in val_preds.values())
     n_tes = min(len(v) for v in tes_preds.values())
     usable = list(val_preds.keys())
     for name in usable:
         val_preds[name] = val_preds[name][:n_val]
         tes_preds[name] = tes_preds[name][:n_tes]
-    val_gt = val_gts[usable[0]][:n_val]
-    tes_gt = tes_gts[usable[0]][:n_tes]
+    val_gt = (val_gts[usable[0]][:n_val] > 0.5).astype(int)
+    tes_gt = (tes_gts[usable[0]][:n_tes] > 0.5).astype(int)
 
     if len(usable) < 2:
         print('[CFA] Need at least 2 models with predictions, got %d — skipping'
               % len(usable))
+        return None
+
+    return val_preds, tes_preds, val_gt, tes_gt, usable
+
+
+def run_cfa(run_dir, summary=None, time_limit=1.0, models_filter=None):
+    """Run CFA combination on model predictions.
+
+    Args:
+        run_dir: path to run directory containing prediction CSVs.
+        summary: optional RunSummary (used to skip killed models).
+        time_limit: max seconds for CFA evaluation (0=unlimited).
+        models_filter: optional list of model keys to include (None=all).
+    """
+    console = Console()
+    data = _load_predictions(run_dir, summary)
+    if data is None:
         return
+    val_preds, tes_preds, val_gt, tes_gt, usable = data
+
+    # Filter to requested models
+    if models_filter:
+        usable = [m for m in usable if m in models_filter]
+        if len(usable) < 2:
+            print('[CFA] Need at least 2 models after filter, got %d — skipping'
+                  % len(usable))
+            return
 
     print('\n===== CFA COMBINATION =====')
     print('[CFA] Combining %d models: %s' % (len(usable), ', '.join(usable)))
+    total_combos = 2 ** len(usable) - 1
+    print('[CFA] %d possible combinations, time limit: %s' % (
+        total_combos, '%.1fs' % time_limit if time_limit > 0 else 'unlimited'))
 
     val_df = pd.DataFrame({name: val_preds[name] for name in usable})
     tes_df = pd.DataFrame({name: tes_preds[name] for name in usable})
-    y_val = (val_gt > 0.5).astype(int)
-    y_tes = (tes_gt > 0.5).astype(int)
 
-    results = unified_cfa.cfa_single_layer(val_df, tes_df, y_val, y_tes,
-                                           metric='accuracy')
+    # Pre-compute normalization and CD (fast, one-time)
+    norm_tes = pd.DataFrame(index=tes_df.index)
+    norm_val = pd.DataFrame(index=val_df.index)
+    for c in usable:
+        lo, hi = val_df[c].min(), val_df[c].max()
+        norm_tes[c] = unified_cfa.normalize_minmax(tes_df[c].values, lo, hi)
+        norm_val[c] = unified_cfa.normalize_minmax(val_df[c].values, lo, hi)
+
+    _, ds, _ = unified_cfa.compute_cd_matrix(val_df)
+    perf = {c: unified_cfa.evaluate(norm_val[c].values, val_gt, 'accuracy')
+            for c in usable}
+
+    methods = unified_cfa.ALL_METHODS
+    results = []
+    combos_done = 0
+    timed_out = False
+    t0 = time()
+
+    for r in range(1, len(usable) + 1):
+        for subset in itertools.combinations(usable, r):
+            name = '+'.join(subset)
+            if r == 1:
+                results.append({'combination': name, 'method': 'individual',
+                    'n_models': 1,
+                    'score': unified_cfa.evaluate(
+                        norm_tes[subset[0]].values, tes_gt, 'accuracy')})
+            else:
+                fn = {
+                    'ASC':   lambda s=subset: unified_cfa.average_score_combination(norm_tes, s),
+                    'ARC':   lambda s=subset: unified_cfa.average_rank_combination(norm_tes, s),
+                    'WSCDS': lambda s=subset: unified_cfa.weighted_score_by_diversity(norm_tes, s, ds),
+                    'WRCDS': lambda s=subset: unified_cfa.weighted_rank_by_diversity(norm_tes, s, ds),
+                    'WSCP':  lambda s=subset: unified_cfa.weighted_score_by_performance(norm_tes, s, perf),
+                    'WRCP':  lambda s=subset: unified_cfa.weighted_rank_by_performance(norm_tes, s, perf),
+                }
+                for m in methods:
+                    is_rank = m in ('ARC', 'WRCDS', 'WRCP')
+                    results.append({'combination': name, 'method': m,
+                        'n_models': r,
+                        'score': unified_cfa.evaluate(fn[m](), tes_gt, 'accuracy', is_rank)})
+            combos_done += 1
+            if time_limit > 0 and (time() - t0) >= time_limit:
+                timed_out = True
+                break
+        if timed_out:
+            break
+
+    elapsed = time() - t0
+    if timed_out:
+        print('[CFA] Time limit reached after %.2fs — evaluated %d/%d combinations'
+              % (elapsed, combos_done, total_combos))
+    else:
+        print('[CFA] All %d combinations evaluated in %.2fs' % (total_combos, elapsed))
+
+    results_df = pd.DataFrame(results).sort_values('score', ascending=False)
 
     # Show results table
-    results_sorted = results.sort_values('score', ascending=False)
     table = Table(title='CFA Fusion Results (accuracy)', expand=True)
     table.add_column('Combination', justify='left')
     table.add_column('Method', justify='center')
     table.add_column('Models', justify='center')
     table.add_column('Score', justify='center')
-    for _, row in results_sorted.head(15).iterrows():
+    for _, row in results_df.head(15).iterrows():
         table.add_row(
             str(row['combination']), str(row['method']),
             str(row['n_models']), '%.4f' % row['score'])
@@ -336,11 +426,10 @@ def run_cfa(summary):
 
     # Save full results
     cfa_path = os.path.join(run_dir, 'cfa_results.csv')
-    results_sorted.to_csv(cfa_path, index=False)
+    results_df.to_csv(cfa_path, index=False)
     print('[CFA] Full results saved to: %s' % cfa_path)
 
-    # Best combo
-    best = results_sorted.iloc[0]
+    best = results_df.iloc[0]
     print('[CFA] Best: %s (%s) = %.4f' % (
         best['combination'], best['method'], best['score']))
 
@@ -442,6 +531,12 @@ if __name__ == '__main__':
                         help='per-model time limit in seconds (0=no limit)')
     parser.add_argument('--sklearn', type=int, default=0,
                         help='run sklearn models: random forest, gradient boost, mlp (0=skip, 1=run)')
+    parser.add_argument('--cfa_time', type=float, default=1.0,
+                        help='time limit in seconds for CFA combination (0=unlimited)')
+    parser.add_argument('--cfa_models', type=str, default=None,
+                        help='comma-separated model names to include in CFA (default: all)')
+    parser.add_argument('--run_dir', type=str, default=None,
+                        help='path to a previous run directory (for -o cfa)')
     args = parser.parse_args()
 
     # -m / --model selects which model(s) to run
@@ -589,11 +684,29 @@ if __name__ == '__main__':
                        args.mem_limit, args.time_limit)
 
         # CFA combination of all model predictions
-        run_cfa(summary)
+        cfa_filter = None
+        if args.cfa_models:
+            cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
+        run_cfa(summary.run_dir, summary=summary, time_limit=args.cfa_time,
+                models_filter=cfa_filter)
 
         print()
         summary.print()
         print('Run saved to: %s' % os.path.abspath(summary.run_dir))
+    elif args.action == 'cfa':
+        if not args.run_dir:
+            # Find the most recent run directory
+            import glob as globmod
+            runs = sorted(globmod.glob('data/run_*'))
+            if not runs:
+                print('ERROR: no run directories found. Train first or use --run_dir.')
+                exit(1)
+            args.run_dir = runs[-1]
+            print('[CFA] Using most recent run: %s' % args.run_dir)
+        cfa_filter = None
+        if args.cfa_models:
+            cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
+        run_cfa(args.run_dir, time_limit=args.cfa_time, models_filter=cfa_filter)
     elif args.action == 'test':
         pure_LSTM.test()
     elif args.action == 'report':

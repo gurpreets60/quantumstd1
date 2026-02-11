@@ -48,10 +48,34 @@ data/run_YYYYMMDD_HHMMSS/
 | Flag | Action |
 |------|--------|
 | `-o train` | Train the model(s) and run CFA |
+| `-o cfa` | Run CFA on a previous run (no training) |
 | `-o test` | Evaluate on val/test sets |
 | `-o pred` | Save predictions to file |
 | `-o adv` | Evaluate adversarial robustness |
 | `-o latent` | Extract latent representations |
+
+### CFA Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--cfa_time` | Time limit in seconds for CFA (0=unlimited) | `1.0` |
+| `--cfa_models` | Comma-separated model names to include | all |
+| `--run_dir` | Path to a previous run directory (for `-o cfa`) | most recent |
+
+Run CFA standalone on the most recent run:
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o cfa
+```
+
+Run CFA on a specific run with selected models:
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o cfa --run_dir data/run_20260211_000403 --cfa_models "RANDOM FOREST,GRADIENT BOOST,CLASSICAL ALSTM"
+```
+
+CFA evaluates combinations smallest-first and stops when the time limit is
+reached. With many models, increase `--cfa_time` to evaluate more combinations.
 
 ### Sklearn Model Options
 
