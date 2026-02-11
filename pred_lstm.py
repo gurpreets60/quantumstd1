@@ -1,5 +1,6 @@
 import argparse
 import copy
+from datetime import datetime
 import numpy as np
 import os
 import pathlib
@@ -10,13 +11,165 @@ for _lib in _nvidia_dir.rglob('nvidia/*/lib'):
     if _lib.is_dir():
         os.environ['LD_LIBRARY_PATH'] = str(_lib) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
 import random
+from sklearn.metrics import accuracy_score, matthews_corrcoef, mean_squared_error
 from sklearn.utils import shuffle
 import tensorflow.compat.v1 as tf
 tf.disable_eager_execution()
 from time import time
 
-from load import load_cla_data
-from evaluator import evaluate
+
+def load_cla_data(data_path, tra_date, val_date, tes_date, seq=2,
+                  date_format='%Y-%m-%d'):
+    fnames = [fname for fname in os.listdir(data_path) if
+              os.path.isfile(os.path.join(data_path, fname))]
+    print(len(fnames), ' tickers selected')
+
+    data_EOD = []
+    for index, fname in enumerate(fnames):
+        single_EOD = np.genfromtxt(
+            os.path.join(data_path, fname), dtype=float, delimiter=',',
+            skip_header=False
+        )
+        data_EOD.append(single_EOD)
+    fea_dim = data_EOD[0].shape[1] - 2
+
+    trading_dates = np.genfromtxt(
+        os.path.join(data_path, '..', 'trading_dates.csv'), dtype=str,
+        delimiter=',', skip_header=False
+    )
+    print(len(trading_dates), 'trading dates:')
+
+    dates_index = {}
+    data_wd = np.zeros([len(trading_dates), 5], dtype=float)
+    wd_encodings = np.identity(5, dtype=float)
+    for index, date in enumerate(trading_dates):
+        dates_index[date] = index
+        data_wd[index] = wd_encodings[datetime.strptime(date, date_format).weekday()]
+
+    tra_ind = dates_index[tra_date]
+    val_ind = dates_index[val_date]
+    tes_ind = dates_index[tes_date]
+    print(tra_ind, val_ind, tes_ind)
+
+    # count training, validation, and testing instances
+    tra_num = 0
+    val_num = 0
+    tes_num = 0
+    for date_ind in range(tra_ind, val_ind):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8:
+                if data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                    tra_num += 1
+    print(tra_num, ' training instances')
+
+    for date_ind in range(val_ind, tes_ind):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8:
+                if data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                    val_num += 1
+    print(val_num, ' validation instances')
+
+    for date_ind in range(tes_ind, len(trading_dates)):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8:
+                if data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                    tes_num += 1
+    print(tes_num, ' testing instances')
+
+    # generate training, validation, and testing instances
+    tra_pv = np.zeros([tra_num, seq, fea_dim], dtype=float)
+    tra_wd = np.zeros([tra_num, seq, 5], dtype=float)
+    tra_gt = np.zeros([tra_num, 1], dtype=float)
+    ins_ind = 0
+    for date_ind in range(tra_ind, val_ind):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8 and \
+                    data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                tra_pv[ins_ind] = data_EOD[tic_ind][date_ind - seq: date_ind, : -2]
+                tra_wd[ins_ind] = data_wd[date_ind - seq: date_ind, :]
+                tra_gt[ins_ind, 0] = (data_EOD[tic_ind][date_ind][-2] + 1) / 2
+                ins_ind += 1
+
+    val_pv = np.zeros([val_num, seq, fea_dim], dtype=float)
+    val_wd = np.zeros([val_num, seq, 5], dtype=float)
+    val_gt = np.zeros([val_num, 1], dtype=float)
+    ins_ind = 0
+    for date_ind in range(val_ind, tes_ind):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8 and \
+                            data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                val_pv[ins_ind] = data_EOD[tic_ind][date_ind - seq: date_ind, :-2]
+                val_wd[ins_ind] = data_wd[date_ind - seq: date_ind, :]
+                val_gt[ins_ind, 0] = (data_EOD[tic_ind][date_ind][-2] + 1) / 2
+                ins_ind += 1
+
+    tes_pv = np.zeros([tes_num, seq, fea_dim], dtype=float)
+    tes_wd = np.zeros([tes_num, seq, 5], dtype=float)
+    tes_gt = np.zeros([tes_num, 1], dtype=float)
+    ins_ind = 0
+    for date_ind in range(tes_ind, len(trading_dates)):
+        if date_ind < seq:
+            continue
+        for tic_ind in range(len(fnames)):
+            if abs(data_EOD[tic_ind][date_ind][-2]) > 1e-8 and \
+                            data_EOD[tic_ind][date_ind - seq: date_ind, :].min() > -123320:
+                tes_pv[ins_ind] = data_EOD[tic_ind][date_ind - seq: date_ind, :-2]
+                tes_wd[ins_ind] = data_wd[date_ind - seq: date_ind, :]
+                tes_gt[ins_ind, 0] = (data_EOD[tic_ind][date_ind][-2] + 1) / 2
+                ins_ind += 1
+    return tra_pv, tra_wd, tra_gt, val_pv, val_wd, val_gt, tes_pv, tes_wd, tes_gt
+
+
+def evaluate(prediction, ground_truth, hinge=False, reg=False):
+    assert ground_truth.shape == prediction.shape, 'shape mis-match'
+    performance = {}
+    if reg:
+        performance['mse'] = mean_squared_error(np.squeeze(ground_truth), np.squeeze(prediction))
+        return performance
+
+    if hinge:
+        pred = (np.sign(prediction) + 1) / 2
+        for ind, p in enumerate(pred):
+            v = p[0]
+            if abs(p[0] - 0.5) < 1e-8 or np.isnan(p[0]):
+                pred[ind][0] = 0
+    else:
+        pred = np.round(prediction)
+    try:
+        performance['acc'] = accuracy_score(ground_truth, pred)
+    except Exception:
+        np.savetxt('prediction', pred, delimiter=',')
+        exit(0)
+    performance['mcc'] = matthews_corrcoef(ground_truth, pred)
+    return performance
+
+
+def compare(current_performance, origin_performance):
+    is_better = {}
+    for metric_name in origin_performance.keys():
+        if metric_name == 'mse':
+            if current_performance[metric_name] < \
+                    origin_performance[metric_name]:
+                is_better[metric_name] = True
+            else:
+                is_better[metric_name] = False
+        else:
+            if current_performance[metric_name] > \
+                    origin_performance[metric_name]:
+                is_better[metric_name] = True
+            else:
+                is_better[metric_name] = False
+    return is_better
 
 class AWLSTM:
     def __init__(self, data_path, model_path, model_save_path, parameters, steps=1, epochs=50,
@@ -629,9 +782,9 @@ if __name__ == '__main__':
                         type=float, default=1e-2)
     parser.add_argument('-g', '--gpu', type=int, default=0, help='use gpu')
     parser.add_argument('-q', '--model_path', help='path to load model',
-                        type=str, default='./saved_model/acl18_alstm/exp')
+                        type=str, default='./data/saved_model/acl18_alstm/exp')
     parser.add_argument('-qs', '--model_save_path', type=str, help='path to save model',
-                        default='./tmp/model')
+                        default='./data/tmp/model')
     parser.add_argument('-o', '--action', type=str, default='train',
                         help='train, test, pred')
     parser.add_argument('-m', '--model', type=str, default='pure_lstm',
