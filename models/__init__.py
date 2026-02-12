@@ -19,3 +19,17 @@ from .decision_tree import DecisionTreeTrainer
 from .extra_trees import ExtraTreesTrainer
 from .adaboost import AdaBoostTrainer
 
+
+from .linear_svc import LinearSVCTrainer
+from .hist_gbdt import HistGBDTTrainer
+from .bagging_dt import BaggingDTTrainer
+from .dummy_mostfreq import DummyMostFreqTrainer
+from .dummy_stratified import DummyStratifiedTrainer
+from .knn3 import KNN3Trainer
+from .knn11_dist import KNN11DistTrainer
+from .sgd_modhuber import SGDModHuberTrainer
+from .gaussian_nb_smooth8 import GaussianNB1e8Trainer
+from .gaussian_nb_smooth7 import GaussianNB1e7Trainer
+
+
+
