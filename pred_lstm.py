@@ -37,7 +37,7 @@ from models import (
     SGDLogTrainer, SGDHingeTrainer, PassiveAggressiveTrainer, RidgeTrainer,
     PerceptronTrainer, LDATrainer, QDATrainer, GaussianNBTrainer,
     NearestCentroidTrainer, DecisionTreeTrainer, ExtraTreesTrainer,
-    AdaBoostTrainer,
+    AdaBoostTrainer, LinearSVCTrainer, HistGBDTTrainer, BaggingDTTrainer, DummyMostFreqTrainer, DummyStratifiedTrainer, KNN3Trainer, KNN11DistTrainer, SGDModHuberTrainer, GaussianNB1e8Trainer, GaussianNB1e7Trainer,
 )
 
 
@@ -565,6 +565,17 @@ if __name__ == '__main__':
         'nc': 'NEAREST CENTROID', 'dt': 'DECISION TREE',
         'et': 'EXTRA TREES', 'ada': 'ADABOOST',
         'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
+            'lsvc': 'LINEAR SVC',
+    'hgb': 'HIST GBDT',
+    'bagdt': 'BAGGING DT2',
+    'dummymf': 'DUMMY MOSTFREQ',
+    'dummystr': 'DUMMY STRATIFIED',
+    'knn3': 'KNN-3',
+    'knn11d': 'KNN-11-DIST',
+    'sgdmh': 'SGD MODHUBER',
+    'gnb1e8': 'GAUSSIAN NB 1e-8',
+    'gnb1e7': 'GAUSSIAN NB 1e-7',
+
      }
 
     if args.model != 'all':
@@ -577,7 +588,7 @@ if __name__ == '__main__':
         args.qlstm_epoch = 0
         args.epoch = 0
         
-        if key in ('rf','gb','mlp','lr','sgdlog','sgdhinge','pa','ridge','perc','lda','gnb','nc','dt','et','ada'):
+        if key in ('rf','gb','mlp','lr','sgdlog','sgdhinge','pa','ridge','perc','lda','gnb','nc','dt','et','ada', 'lsvc'     'hgb',     'bagdt',     'dummymf',     'dummystr',     'knn3',     'knn11d',     'sgdmh',     'gnb1e8',     'gnb1e7'):
            args.sklearn = 1
 
 
@@ -660,6 +671,11 @@ if __name__ == '__main__':
                'SGD LOG', 'SGD HINGE', 'PASSIVE AGGRESSIVE', 'RIDGE', 'PERCEPTRON',
                'LDA', 'GAUSSIAN NB', 'NEAREST CENTROID',
                'DECISION TREE', 'EXTRA TREES', 'ADABOOST',
+               'LINEAR SVC', 'HIST GBDT', 'BAGGING DT2',
+'DUMMY MOSTFREQ', 'DUMMY STRATIFIED',
+'KNN-3', 'KNN-11-DIST',
+'SGD MODHUBER', 'GAUSSIAN NB 1e-8', 'GAUSSIAN NB 1e-7',
+
                  ]:
                if not only_name or sk_name == only_name:
                   summary.add_model(sk_name, 1)
@@ -713,6 +729,17 @@ if __name__ == '__main__':
     ('DECISION TREE', DecisionTreeTrainer),
     ('EXTRA TREES', ExtraTreesTrainer),
     ('ADABOOST', AdaBoostTrainer),
+    ('LINEAR SVC', LinearSVCTrainer),
+('HIST GBDT', HistGBDTTrainer),
+('BAGGING DT2', BaggingDTTrainer),
+('DUMMY MOSTFREQ', DummyMostFreqTrainer),
+('DUMMY STRATIFIED', DummyStratifiedTrainer),
+('KNN-3', KNN3Trainer),
+('KNN-11-DIST', KNN11DistTrainer),
+('SGD MODHUBER', SGDModHuberTrainer),
+('GAUSSIAN NB 1e-8', GaussianNB1e8Trainer),
+('GAUSSIAN NB 1e-7', GaussianNB1e7Trainer),
+
 ]:
              if only_name and name != only_name:
                 continue
