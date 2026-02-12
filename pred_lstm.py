@@ -27,18 +27,7 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from models import (AWLSTM, QuantumTrainer, OOMTestTrainer,
-                     RandomForestTrainer, GradientBoostTrainer, MLPTrainer,
-                     LogisticRegressionTrainer)
-from models import (
-    AWLSTM, QuantumTrainer, OOMTestTrainer,
-    RandomForestTrainer, GradientBoostTrainer, MLPTrainer,
-    LogisticRegressionTrainer,
-    SGDLogTrainer, SGDHingeTrainer, PassiveAggressiveTrainer, RidgeTrainer,
-    PerceptronTrainer, LDATrainer, QDATrainer, GaussianNBTrainer,
-    NearestCentroidTrainer, DecisionTreeTrainer, ExtraTreesTrainer,
-    AdaBoostTrainer, LinearSVCTrainer, HistGBDTTrainer, BaggingDTTrainer, DummyMostFreqTrainer, DummyStratifiedTrainer, KNN3Trainer, KNN11DistTrainer, SGDModHuberTrainer, GaussianNB1e8Trainer, GaussianNB1e7Trainer,
-)
+from models import AWLSTM, QuantumTrainer, OOMTestTrainer, SKLEARN_REGISTRY
 
 
 
@@ -445,6 +434,223 @@ def run_cfa(run_dir, summary=None, time_limit=1.0, models_filter=None):
 
 
 # ---------------------------------------------------------------------------
+# Greedy CFA — forward selection with pruning
+# ---------------------------------------------------------------------------
+
+def _cfa_eval_combo(subset, norm_df, gt, ds, perf):
+    """Evaluate a model subset across all 6 CFA methods, return best score and method."""
+    methods = unified_cfa.ALL_METHODS
+    best_score = -1
+    best_method = ''
+    fn = {
+        'ASC':   lambda: unified_cfa.average_score_combination(norm_df, subset),
+        'ARC':   lambda: unified_cfa.average_rank_combination(norm_df, subset),
+        'WSCDS': lambda: unified_cfa.weighted_score_by_diversity(norm_df, subset, ds),
+        'WRCDS': lambda: unified_cfa.weighted_rank_by_diversity(norm_df, subset, ds),
+        'WSCP':  lambda: unified_cfa.weighted_score_by_performance(norm_df, subset, perf),
+        'WRCP':  lambda: unified_cfa.weighted_rank_by_performance(norm_df, subset, perf),
+    }
+    for m in methods:
+        is_rank = m in ('ARC', 'WRCDS', 'WRCP')
+        score = unified_cfa.evaluate(fn[m](), gt, 'accuracy', is_rank)
+        if score > best_score:
+            best_score = score
+            best_method = m
+    return best_score, best_method
+
+
+def run_cfa_greedy(run_dir, summary=None, time_limit=10.0, models_filter=None,
+                   max_rounds=20):
+    """Greedy forward selection + pruning for CFA ensemble recommendation.
+
+    Instead of exhaustive 2^N search, builds the best combination incrementally:
+    1. Score all individuals
+    2. Each round: try adding each remaining model, keep best improvement
+    3. Prune: drop models that never helped from the pool
+    4. Save incremental results after each round
+
+    Args:
+        run_dir: path to run directory containing prediction CSVs.
+        summary: optional RunSummary.
+        time_limit: total wall-clock budget in seconds.
+        models_filter: optional list of model names to include.
+        max_rounds: max forward selection rounds.
+    """
+    console = Console()
+    data = _load_predictions(run_dir, summary)
+    if data is None:
+        return
+    val_preds, tes_preds, val_gt, tes_gt, usable = data
+
+    if models_filter:
+        usable = [m for m in usable if m in models_filter]
+    if len(usable) < 2:
+        print('[CFA-Greedy] Need at least 2 models, got %d — skipping' % len(usable))
+        return
+
+    print('\n===== CFA GREEDY SELECTION =====')
+    print('[CFA-Greedy] Pool: %d models, time limit: %.1fs, max rounds: %d'
+          % (len(usable), time_limit, max_rounds))
+
+    # Build normalized DataFrames (val-based normalization)
+    val_df = pd.DataFrame({name: val_preds[name] for name in usable})
+    tes_df = pd.DataFrame({name: tes_preds[name] for name in usable})
+    norm_val = pd.DataFrame(index=val_df.index)
+    norm_tes = pd.DataFrame(index=tes_df.index)
+    for c in usable:
+        lo, hi = val_df[c].min(), val_df[c].max()
+        norm_val[c] = unified_cfa.normalize_minmax(val_df[c].values, lo, hi)
+        norm_tes[c] = unified_cfa.normalize_minmax(tes_df[c].values, lo, hi)
+
+    _, ds, _ = unified_cfa.compute_cd_matrix(val_df)
+    perf = {c: unified_cfa.evaluate(norm_val[c].values, val_gt, 'accuracy')
+            for c in usable}
+
+    # Score individuals on val
+    individual_scores = {}
+    for m in usable:
+        individual_scores[m] = unified_cfa.evaluate(
+            norm_val[m].values, val_gt, 'accuracy')
+
+    # CSV for incremental saves
+    greedy_csv_path = os.path.join(run_dir, 'cfa_greedy.csv')
+    greedy_rows = []
+
+    # Score individuals on test and record
+    print('\n[CFA-Greedy] Individual scores (val):')
+    for m in sorted(usable, key=lambda x: individual_scores[x], reverse=True):
+        tes_score = unified_cfa.evaluate(norm_tes[m].values, tes_gt, 'accuracy')
+        print('  %-30s val=%.4f  test=%.4f' % (m, individual_scores[m], tes_score))
+        greedy_rows.append({
+            'round': 0, 'action': 'individual', 'combination': m,
+            'method': 'individual', 'n_models': 1,
+            'val_score': individual_scores[m], 'test_score': tes_score,
+            'pool_size': len(usable), 'pruned': '',
+        })
+
+    # Start greedy forward selection
+    pool = sorted(usable, key=lambda x: individual_scores[x], reverse=True)
+    best_combo = [pool.pop(0)]
+    current_best_val, current_best_method = _cfa_eval_combo(
+        best_combo, norm_val, val_gt, ds, perf)
+    current_best_tes, _ = _cfa_eval_combo(
+        best_combo, norm_tes, tes_gt, ds, perf)
+
+    print('\n[CFA-Greedy] Starting combo: [%s] val=%.4f test=%.4f'
+          % (best_combo[0], current_best_val, current_best_tes))
+
+    greedy_rows.append({
+        'round': 0, 'action': 'start', 'combination': best_combo[0],
+        'method': current_best_method, 'n_models': 1,
+        'val_score': current_best_val, 'test_score': current_best_tes,
+        'pool_size': len(pool), 'pruned': '',
+    })
+
+    t0 = time()
+    evals_total = len(usable)  # counted individuals
+
+    for rnd in range(1, max_rounds + 1):
+        if not pool:
+            print('[CFA-Greedy] Pool exhausted after %d rounds' % (rnd - 1))
+            break
+        if time() - t0 >= time_limit:
+            print('[CFA-Greedy] Time limit reached after %.1fs' % (time() - t0))
+            break
+
+        best_gain = 0
+        best_candidate = None
+        best_cand_method = ''
+        best_cand_val = 0
+        never_helped = []
+
+        for candidate in pool:
+            trial = best_combo + [candidate]
+            score, method = _cfa_eval_combo(trial, norm_val, val_gt, ds, perf)
+            evals_total += 1
+            gain = score - current_best_val
+            if gain > best_gain:
+                best_gain = gain
+                best_candidate = candidate
+                best_cand_method = method
+                best_cand_val = score
+            if gain <= 0:
+                never_helped.append(candidate)
+
+        if best_candidate is None:
+            print('[CFA-Greedy] No improvement in round %d — stopping' % rnd)
+            greedy_rows.append({
+                'round': rnd, 'action': 'stop_no_gain',
+                'combination': '+'.join(best_combo),
+                'method': current_best_method,
+                'n_models': len(best_combo),
+                'val_score': current_best_val,
+                'test_score': current_best_tes,
+                'pool_size': len(pool), 'pruned': '',
+            })
+            break
+
+        # Accept the best candidate
+        best_combo.append(best_candidate)
+        pool.remove(best_candidate)
+        current_best_val = best_cand_val
+        current_best_method = best_cand_method
+        current_best_tes, _ = _cfa_eval_combo(
+            best_combo, norm_tes, tes_gt, ds, perf)
+
+        combo_str = '+'.join(best_combo)
+        print('[CFA-Greedy] Round %d: +%-25s val=%.4f (+%.4f) test=%.4f  [%d in combo, %d in pool]'
+              % (rnd, best_candidate, current_best_val, best_gain,
+                 current_best_tes, len(best_combo), len(pool)))
+
+        # Prune: drop worst individual among models that never helped, if pool large enough
+        pruned = ''
+        if len(pool) > len(best_combo) * 2 and never_helped:
+            worst = min(never_helped, key=lambda m: individual_scores.get(m, 0))
+            pool.remove(worst)
+            pruned = worst
+            print('[CFA-Greedy]   Pruned: %s (never helped, worst individual)' % worst)
+
+        greedy_rows.append({
+            'round': rnd, 'action': 'add',
+            'combination': combo_str, 'method': current_best_method,
+            'n_models': len(best_combo),
+            'val_score': current_best_val, 'test_score': current_best_tes,
+            'pool_size': len(pool), 'pruned': pruned,
+        })
+
+        # Save incremental results after each round
+        pd.DataFrame(greedy_rows).to_csv(greedy_csv_path, index=False)
+
+    elapsed = time() - t0
+    print('\n[CFA-Greedy] Done in %.1fs, %d evaluations' % (elapsed, evals_total))
+
+    # Final save
+    pd.DataFrame(greedy_rows).to_csv(greedy_csv_path, index=False)
+
+    # Display final recommendation
+    table = Table(title='CFA Greedy Ensemble Recommendation', expand=True)
+    table.add_column('Round', justify='center')
+    table.add_column('Combination', justify='left')
+    table.add_column('Method', justify='center')
+    table.add_column('Models', justify='center')
+    table.add_column('Val Score', justify='center')
+    table.add_column('Test Score', justify='center')
+    for row in greedy_rows:
+        if row['action'] in ('add', 'start', 'stop_no_gain'):
+            table.add_row(
+                str(row['round']), str(row['combination']),
+                str(row['method']), str(row['n_models']),
+                '%.4f' % row['val_score'], '%.4f' % row['test_score'])
+    console.print(table)
+
+    print('[CFA-Greedy] Incremental results saved to: %s' % greedy_csv_path)
+    print('[CFA-Greedy] Final ensemble (%d models): %s'
+          % (len(best_combo), '+'.join(best_combo)))
+    print('[CFA-Greedy] Best method: %s | val=%.4f | test=%.4f'
+          % (current_best_method, current_best_val, current_best_tes))
+
+
+# ---------------------------------------------------------------------------
 # Model runner with guards
 # ---------------------------------------------------------------------------
 
@@ -506,7 +712,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--action', type=str, default='train',
                         help='train, test, pred')
     parser.add_argument('-m', '--model', type=str, default='all',
-                        help='which model to run: all, rf, gb, mlp, lr, sgdlog, sgdhinge, pa, ridge, perc, lda, qda, gnb, nc, dt, et, ada, quantum, classical, oom')
+                        help='which model to run: all, sklearn, quantum, classical, oom')
 
     parser.add_argument('-f', '--fix_init', type=int, default=0,
                         help='use fixed initialization')
@@ -544,6 +750,9 @@ if __name__ == '__main__':
                         help='run sklearn models: random forest, gradient boost, mlp (0=skip, 1=run)')
     parser.add_argument('--cfa_time', type=float, default=1.0,
                         help='time limit in seconds for CFA combination (0=unlimited)')
+    parser.add_argument('--cfa_mode', type=str, default='greedy',
+                        choices=['exhaustive', 'greedy'],
+                        help='CFA mode: exhaustive (2^N combos) or greedy (forward selection)')
     parser.add_argument('--cfa_models', type=str, default=None,
                         help='comma-separated model names to include in CFA (default: all)')
     parser.add_argument('--run_dir', type=str, default=None,
@@ -552,46 +761,21 @@ if __name__ == '__main__':
 
     # -m / --model selects which model(s) to run
     _MODEL_MAP = {
-        'rf': 'RANDOM FOREST', 'gb': 'GRADIENT BOOST', 'mlp': 'MLP CLASSIFIER',
-        'lr': 'LOGISTIC REGRESSION',
         'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
     }
-    _MODEL_MAP = {
-        'rf': 'RANDOM FOREST', 'gb': 'GRADIENT BOOST', 'mlp': 'MLP CLASSIFIER',
-        'lr': 'LOGISTIC REGRESSION',
-        'sgdlog': 'SGD LOG', 'sgdhinge': 'SGD HINGE',
-        'pa': 'PASSIVE AGGRESSIVE', 'ridge': 'RIDGE', 'perc': 'PERCEPTRON',
-        'lda': 'LDA', 'gnb': 'GAUSSIAN NB',
-        'nc': 'NEAREST CENTROID', 'dt': 'DECISION TREE',
-        'et': 'EXTRA TREES', 'ada': 'ADABOOST',
-        'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
-            'lsvc': 'LINEAR SVC',
-    'hgb': 'HIST GBDT',
-    'bagdt': 'BAGGING DT2',
-    'dummymf': 'DUMMY MOSTFREQ',
-    'dummystr': 'DUMMY STRATIFIED',
-    'knn3': 'KNN-3',
-    'knn11d': 'KNN-11-DIST',
-    'sgdmh': 'SGD MODHUBER',
-    'gnb1e8': 'GAUSSIAN NB 1e-8',
-    'gnb1e7': 'GAUSSIAN NB 1e-7',
-
-     }
 
     if args.model != 'all':
         key = args.model.lower()
-        if key not in _MODEL_MAP:
-            print('ERROR: --model must be one of: all, %s' % ', '.join(_MODEL_MAP.keys()))
+        if key not in _MODEL_MAP and key not in ('sklearn',):
+            print('ERROR: --model must be one of: all, sklearn, %s'
+                  % ', '.join(_MODEL_MAP.keys()))
             exit(1)
         args.test_oom = 0
         args.sklearn = 0
         args.qlstm_epoch = 0
         args.epoch = 0
-        
-        if key in ('rf','gb','mlp','lr','sgdlog','sgdhinge','pa','ridge','perc','lda','gnb','nc','dt','et','ada', 'lsvc'     'hgb',     'bagdt',     'dummymf',     'dummystr',     'knn3',     'knn11d',     'sgdmh',     'gnb1e8',     'gnb1e7'):
-           args.sklearn = 1
-
-
+        if key == 'sklearn':
+            args.sklearn = 1
         elif key == 'quantum':
             args.qlstm_epoch = max(args.qlstm_epoch, 1) or 1
         elif key == 'classical':
@@ -621,7 +805,12 @@ if __name__ == '__main__':
         cfa_filter = None
         if args.cfa_models:
             cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
-        run_cfa(args.run_dir, time_limit=args.cfa_time, models_filter=cfa_filter)
+        if args.cfa_mode == 'greedy':
+            run_cfa_greedy(args.run_dir, time_limit=args.cfa_time,
+                           models_filter=cfa_filter)
+        else:
+            run_cfa(args.run_dir, time_limit=args.cfa_time,
+                    models_filter=cfa_filter)
         exit(0)
 
     parameters = {
@@ -661,30 +850,15 @@ if __name__ == '__main__':
         summary = RunSummary()
 
         # Register all models that will run
-        only_name = _MODEL_MAP.get(args.model, '') if args.model != 'all' else ''
         if args.test_oom:
             summary.add_model('TEST OOM', 1)
-        
-        if args.sklearn:
-           for sk_name in [
-               'RANDOM FOREST', 'GRADIENT BOOST', 'MLP CLASSIFIER', 'LOGISTIC REGRESSION',
-               'SGD LOG', 'SGD HINGE', 'PASSIVE AGGRESSIVE', 'RIDGE', 'PERCEPTRON',
-               'LDA', 'GAUSSIAN NB', 'NEAREST CENTROID',
-               'DECISION TREE', 'EXTRA TREES', 'ADABOOST',
-               'LINEAR SVC', 'HIST GBDT', 'BAGGING DT2',
-'DUMMY MOSTFREQ', 'DUMMY STRATIFIED',
-'KNN-3', 'KNN-11-DIST',
-'SGD MODHUBER', 'GAUSSIAN NB 1e-8', 'GAUSSIAN NB 1e-7',
 
-                 ]:
-               if not only_name or sk_name == only_name:
-                  summary.add_model(sk_name, 1)
+        # Auto-discovered sklearn models (registered during training below)
+        _sklearn_classes = sorted(SKLEARN_REGISTRY.items())
 
-
-
-        if args.qlstm_epoch > 0:
+        if args.qlstm_epoch > 0 and args.model in ('all', 'quantum'):
             summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
-        if args.epoch > 0:
+        if args.epoch > 0 and args.model in ('all', 'classical'):
             summary.add_model('CLASSICAL ALSTM', args.epoch)
         summary.print()
 
@@ -701,8 +875,8 @@ if __name__ == '__main__':
             del oom
             gc.collect()
 
-        # Sklearn models
-        if args.sklearn:
+        # Sklearn models (auto-discovered)
+        if args.model in ('all', 'sklearn') or args.sklearn:
             hinge = (args.hinge_lose == 1)
             data_args = dict(
                 tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
@@ -710,46 +884,18 @@ if __name__ == '__main__':
                 tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
                 hinge=hinge,
             )
-            only_name = _MODEL_MAP.get(args.model, '') if args.model != 'all' else ''
-            
-            for name, cls in [
-    ('RANDOM FOREST', RandomForestTrainer),
-    ('GRADIENT BOOST', GradientBoostTrainer),
-    ('MLP CLASSIFIER', MLPTrainer),
-    ('LOGISTIC REGRESSION', LogisticRegressionTrainer),
-    ('SGD LOG', SGDLogTrainer),
-    ('SGD HINGE', SGDHingeTrainer),
-    ('PASSIVE AGGRESSIVE', PassiveAggressiveTrainer),
-    ('RIDGE', RidgeTrainer),
-    ('PERCEPTRON', PerceptronTrainer),
-    ('LDA', LDATrainer),
-    
-    ('GAUSSIAN NB', GaussianNBTrainer),
-    ('NEAREST CENTROID', NearestCentroidTrainer),
-    ('DECISION TREE', DecisionTreeTrainer),
-    ('EXTRA TREES', ExtraTreesTrainer),
-    ('ADABOOST', AdaBoostTrainer),
-    ('LINEAR SVC', LinearSVCTrainer),
-('HIST GBDT', HistGBDTTrainer),
-('BAGGING DT2', BaggingDTTrainer),
-('DUMMY MOSTFREQ', DummyMostFreqTrainer),
-('DUMMY STRATIFIED', DummyStratifiedTrainer),
-('KNN-3', KNN3Trainer),
-('KNN-11-DIST', KNN11DistTrainer),
-('SGD MODHUBER', SGDModHuberTrainer),
-('GAUSSIAN NB 1e-8', GaussianNB1e8Trainer),
-('GAUSSIAN NB 1e-7', GaussianNB1e7Trainer),
-
-]:
-             if only_name and name != only_name:
-                continue
-             trainer = cls(**data_args)
-             _run_model(name, trainer.train, summary, args.mem_limit, args.time_limit)
-             del trainer
-             gc.collect()
-
-
-
+            print('[AutoDiscover] %d sklearn models found' % len(_sklearn_classes))
+            for _cls_name, _cls in _sklearn_classes:
+                try:
+                    trainer = _cls(**data_args)
+                except Exception as e:
+                    print('[SKIP] %s failed to init: %s' % (_cls_name, e))
+                    continue
+                summary.add_model(trainer.model_name, 1)
+                _run_model(trainer.model_name, trainer.train, summary,
+                           args.mem_limit, args.time_limit)
+                del trainer
+                gc.collect()
 
 
 
@@ -757,7 +903,7 @@ if __name__ == '__main__':
 
 
         # Quantum LSTM (if epochs > 0)
-        if args.qlstm_epoch > 0:
+        if args.qlstm_epoch > 0 and args.model in ('all', 'quantum'):
             qt = QuantumTrainer(
                 tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
                 val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
@@ -777,7 +923,7 @@ if __name__ == '__main__':
             gc.collect()
 
         # Classical ALSTM
-        if args.epoch > 0:
+        if args.epoch > 0 and args.model in ('all', 'classical'):
             _run_model('CLASSICAL ALSTM', pure_LSTM.train, summary,
                        args.mem_limit, args.time_limit)
 
@@ -785,8 +931,12 @@ if __name__ == '__main__':
         cfa_filter = None
         if args.cfa_models:
             cfa_filter = [m.strip() for m in args.cfa_models.split(',')]
-        run_cfa(summary.run_dir, summary=summary, time_limit=args.cfa_time,
-                models_filter=cfa_filter)
+        if args.cfa_mode == 'greedy':
+            run_cfa_greedy(summary.run_dir, summary=summary,
+                           time_limit=args.cfa_time, models_filter=cfa_filter)
+        else:
+            run_cfa(summary.run_dir, summary=summary, time_limit=args.cfa_time,
+                    models_filter=cfa_filter)
 
         print()
         summary.print()

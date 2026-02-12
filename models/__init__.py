@@ -1,35 +1,39 @@
+"""Models package — auto-discovers all SklearnTrainer subclasses."""
+import importlib
+import os
+import pkgutil
+
+# Explicit imports for non-sklearn models
 from .classical_alstm import AWLSTM
 from .quantum_lstm import QuantumTrainer
 from .test_oom import OOMTestTrainer
-from .random_forest import RandomForestTrainer
-from .gradient_boosting import GradientBoostTrainer
-from .mlp_classifier import MLPTrainer
-from .logistic_regression import LogisticRegressionTrainer
 
-from .sgd_log import SGDLogTrainer
-from .sgd_hinge import SGDHingeTrainer
-from .passive_aggressive import PassiveAggressiveTrainer
-from .ridge import RidgeTrainer
-from .perceptron import PerceptronTrainer
-from .lda import LDATrainer
-from .qda import QDATrainer
-from .gaussian_nb import GaussianNBTrainer
-from .nearest_centroid import NearestCentroidTrainer
-from .decision_tree import DecisionTreeTrainer
-from .extra_trees import ExtraTreesTrainer
-from .adaboost import AdaBoostTrainer
+# Auto-discover all SklearnTrainer subclasses from .py files in this directory.
+# Each file that defines a SklearnTrainer subclass is imported, and the class
+# is registered in SKLEARN_REGISTRY keyed by its model_name.
 
+from .sklearn_base import SklearnTrainer
 
-from .linear_svc import LinearSVCTrainer
-from .hist_gbdt import HistGBDTTrainer
-from .bagging_dt import BaggingDTTrainer
-from .dummy_mostfreq import DummyMostFreqTrainer
-from .dummy_stratified import DummyStratifiedTrainer
-from .knn3 import KNN3Trainer
-from .knn11_dist import KNN11DistTrainer
-from .sgd_modhuber import SGDModHuberTrainer
-from .gaussian_nb_smooth8 import GaussianNB1e8Trainer
-from .gaussian_nb_smooth7 import GaussianNB1e7Trainer
+SKLEARN_REGISTRY = {}  # model_name -> class
 
+_pkg_dir = os.path.dirname(__file__)
+_skip = {'__init__', 'sklearn_base', 'monitor', 'cfa', 'classical_alstm',
+         'quantum_lstm', 'test_oom'}
 
+for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
+    if _name in _skip:
+        continue
+    try:
+        _mod = importlib.import_module('.' + _name, __package__)
+    except Exception:
+        continue
+    for _attr in dir(_mod):
+        _obj = getattr(_mod, _attr)
+        if (isinstance(_obj, type)
+                and issubclass(_obj, SklearnTrainer)
+                and _obj is not SklearnTrainer):
+            if _obj not in SKLEARN_REGISTRY.values():
+                SKLEARN_REGISTRY[_attr] = _obj
 
+# Clean up module namespace
+del importlib, os, pkgutil, _pkg_dir, _skip
