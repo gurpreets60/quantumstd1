@@ -38,10 +38,18 @@ class SklearnTrainer:
         # Auto-calibrate: pilot fit on small subset, then cap training size
         pilot_n = min(50, tra_x.shape[0])
         pilot_y = (tra_y[:pilot_n] > 0.5).astype(int) if self.hinge else np.round(tra_y[:pilot_n]).astype(int)
-        t0 = time()
-        self.estimator.fit(tra_x[:pilot_n], pilot_y)
-        pilot_sec = time() - t0
-        sec_per_sample = pilot_sec / pilot_n
+        try:
+            t0 = time()
+            self.estimator.fit(tra_x[:pilot_n], pilot_y)
+            pilot_sec = time() - t0
+            sec_per_sample = pilot_sec / pilot_n
+        except Exception as e:
+            # Pilot fit failed (e.g., QDA rank-deficient covariance with
+            # fewer samples than features). Use all training data instead.
+            from sklearn.base import clone
+            self.estimator = clone(estimator)
+            print(f'[{model_name}] Pilot fit failed ({e}), using all data')
+            sec_per_sample = 0
 
         # Reserve 30% of budget for predict, use 70% for fit
         fit_budget = time_budget * 0.7

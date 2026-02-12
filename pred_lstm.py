@@ -878,11 +878,15 @@ if __name__ == '__main__':
         # Sklearn models (auto-discovered)
         if args.model in ('all', 'sklearn') or args.sklearn:
             hinge = (args.hinge_lose == 1)
+            # Use 80% of outer time_limit as the inner auto-calibration budget
+            # so models train on more data when given more time.
+            _tb = args.time_limit * 0.8 if args.time_limit > 0 else 0.8
             data_args = dict(
                 tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
                 val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
                 tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
                 hinge=hinge,
+                time_budget=_tb,
             )
             print('[AutoDiscover] %d sklearn models found' % len(_sklearn_classes))
             for _cls_name, _cls in _sklearn_classes:
