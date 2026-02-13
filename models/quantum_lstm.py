@@ -188,6 +188,8 @@ class QuantumTrainer:
         all_val_rows = []
         all_tes_rows = []
         train_t0 = time()
+        last_checkpoint = time()
+        CHECKPOINT_INTERVAL = 300  # save every 5 minutes
 
         monitor.start()
         for epoch in range(self.epochs):
@@ -211,6 +213,12 @@ class QuantumTrainer:
                 self.optimizer.step()
                 epoch_loss += loss.item()
                 n_batches += 1
+
+                # Time-based checkpoint during long epochs
+                if summary and (time() - last_checkpoint) >= CHECKPOINT_INTERVAL:
+                    summary.save_model('QUANTUM LSTM', self.model.state_dict())
+                    last_checkpoint = time()
+                    monitor.log('[QUANTUM LSTM] Checkpoint saved (%.0fs elapsed)' % (last_checkpoint - train_t0))
             avg_loss = epoch_loss / max(n_batches, 1)
             monitor.log('----->>>>> Training loss: %.6f' % avg_loss)
 
@@ -244,13 +252,16 @@ class QuantumTrainer:
             monitor.epoch_done(epoch, t4 - t1)
             monitor.log('epoch: %d time: %.4f' % (epoch, t4 - t1))
 
+            # Checkpoint after every epoch so progress is never lost
+            if summary:
+                summary.save_model('QUANTUM LSTM', self.model.state_dict())
+                if all_val_rows:
+                    summary.save_predictions('QUANTUM LSTM', 'val', np.vstack(all_val_rows))
+                    summary.save_predictions('QUANTUM LSTM', 'test', np.vstack(all_tes_rows))
+
         monitor.stop()
         print('\n[QUANTUM LSTM] Best Valid performance:', best_valid_perf)
         print('\t[QUANTUM LSTM] Best Test performance:', best_test_perf)
         if summary:
             summary.finish_model('QUANTUM LSTM', best_valid_perf, best_test_perf, time() - train_t0)
-            if all_val_rows:
-                summary.save_predictions('QUANTUM LSTM', 'val', np.vstack(all_val_rows))
-                summary.save_predictions('QUANTUM LSTM', 'test', np.vstack(all_tes_rows))
-            summary.save_model('QUANTUM LSTM', self.model.state_dict())
         return best_valid_perf, best_test_perf

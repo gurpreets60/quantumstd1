@@ -1,2 +1,12 @@
 .venv/
 __pycache__/
+
+# Training run data (large model files, predictions, logs)
+data/run_2026*/
+data/run_combined/
+data/run_cfa_full/
+data/*.log
+data/*.txt
+data/*.pid
+
+# Keep specific important runs tracked via git add -f
