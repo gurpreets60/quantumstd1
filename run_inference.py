@@ -21,8 +21,9 @@ from models.quantum_lstm import QLSTMModel
 
 # ---------- Config ----------
 FULL_RUN = 'data/run_20260213_044849'       # sklearn models trained on full 20,315
-QUANTUM_RUN = 'data/run_20260213_042907'    # best available quantum LSTM checkpoint
-SKLEARN_MODELS = ['PERCEPTRON', 'PASSIVE AGGRESSIVE', 'BAGGING DT2']
+QUANTUM_RUN = 'data/run_20260213_153514'    # latest quantum LSTM checkpoint (5-min saves)
+SKLEARN_MODELS = ['SGD MODHUBER', 'PASSIVE AGGRESSIVE', 'QDA',
+                  'GRADIENT BOOST', 'EXTRA TREES', 'DECISION TREE', 'BAGGING DT2']
 DATA_PATH = './data/stocknet-dataset/price/ourpped'
 TRA_DATE = '2014-01-02'
 VAL_DATE = '2015-08-03'
