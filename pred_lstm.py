@@ -7,6 +7,7 @@ import gc
 import io
 import itertools
 import numpy as np
+import glob
 import os
 import pathlib
 import psutil
@@ -77,13 +78,44 @@ class RunSummary:
         safe_name = model_name.replace(' ', '_')
         return os.path.join(self.run_dir, 'model_%s.pkl' % safe_name)
 
+    @staticmethod
+    def load_model(path):
+        """Load a model from a single .pkl or split .pkl_NNN chunks."""
+        import pickle
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        # Reassemble from chunks
+        base, ext = os.path.splitext(path)
+        chunks = sorted(glob.glob('%s_[0-9][0-9][0-9]%s' % (base, ext)))
+        if not chunks:
+            raise FileNotFoundError(path)
+        buf = b''
+        for chunk in chunks:
+            with open(chunk, 'rb') as f:
+                buf += f.read()
+        return pickle.loads(buf)
+
     def save_model(self, model_name, model_obj):
-        """Save a trained model (sklearn estimator or torch state_dict)."""
+        """Save a trained model, splitting into <99 MB chunks for git."""
         import pickle
         path = self.model_path(model_name)
-        with open(path, 'wb') as f:
-            pickle.dump(model_obj, f)
-        print(f'[{model_name}] Model saved to {path}')
+        data = pickle.dumps(model_obj)
+        max_bytes = 99 * 1024 * 1024
+
+        if len(data) <= max_bytes:
+            with open(path, 'wb') as f:
+                f.write(data)
+            print(f'[{model_name}] Model saved to {path} ({len(data)} bytes)')
+        else:
+            base, ext = os.path.splitext(path)
+            n_chunks = (len(data) + max_bytes - 1) // max_bytes
+            for i in range(n_chunks):
+                chunk_path = '%s_%03d%s' % (base, i + 1, ext)
+                with open(chunk_path, 'wb') as f:
+                    f.write(data[i * max_bytes:(i + 1) * max_bytes])
+            print(f'[{model_name}] Model saved to {base}_*{ext} '
+                  f'({n_chunks} chunks, {len(data)} bytes total)')
 
     def save_predictions(self, model_name, split, data):
         """Save predictions to CSV, splitting into numbered files if over 99 MB."""
