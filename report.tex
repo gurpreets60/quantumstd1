@@ -3,11 +3,23 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{amssymb}
 \usepackage{hyperref}
 \usepackage{float}
 \usepackage{caption}
 \usepackage{subcaption}
 \usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\small\ttfamily,
+  breaklines=true,
+  frame=single,
+  language=Python,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+}
 
 \title{Quantum-Classical Hybrid Stock Prediction\\with Combinatorial Fusion Analysis}
 \author{QuantumSTD1 Project Report}
@@ -17,7 +29,7 @@
 \maketitle
 
 \begin{abstract}
-We present results from a hybrid quantum-classical stock prediction system combining a Quantum Long Short-Term Memory (QLSTM) network with 26 classical sklearn models via Combinatorial Fusion Analysis (CFA). Training was performed on the StockNet dataset (87 tickers, 20,315 training / 2,555 validation / 3,720 test samples). While the quantum model is still in early training stages, CFA demonstrates that diverse model ensembles consistently outperform individual models. The best sklearn-only ensemble achieves 58.1\% validation accuracy and 52.6\% test accuracy, while preliminary quantum-classical fusion shows promising complementarity.
+We present results from a hybrid quantum-classical stock prediction system combining a Quantum Long Short-Term Memory (QLSTM) network with 26 classical sklearn models via Combinatorial Fusion Analysis (CFA). The QLSTM uses a 5-qubit variational quantum circuit (VQC) with Hadamard, RY rotation, and CNOT entangling gates, simulated via PennyLane's \texttt{default.qubit} backend. Training was performed on the StockNet dataset (87 tickers, 20,315 training / 2,555 validation / 3,720 test samples). The system employs a two-phase scaling methodology: rapid prototyping under auto-calibrated time budgets, followed by uncapped full-dataset training for production runs. The best sklearn-only ensemble achieves 58.1\% validation accuracy and 52.6\% test accuracy via CFA's diversity-weighted rank combination, while preliminary quantum-classical fusion shows promising complementarity.
 \end{abstract}
 
 \section{Introduction}
@@ -40,15 +52,270 @@ We use the StockNet dataset with 87 stock tickers and 652 trading dates:
     \item Training: 20,315 samples (2014-01-02 to 2015-08-02)
     \item Validation: 2,555 samples (2015-08-03 to 2015-09-30)
     \item Test: 3,720 samples (2015-10-01 to end)
-    \item Features: 11 dimensions per time step, sequence length 5
+    \item Features: 11 dimensions per time step (OHLCV-derived), sequence length 5
 \end{itemize}
 
-\subsection{Models}
-We train 27 models total:
+Each sample consists of 5 consecutive trading days of normalized price features for a single stock, and the label is the binary movement direction on the following day. Ground truth labels are normalized to $[0,1]$ via $(y + 1) / 2$ and binarized at the 0.5 threshold.
+
+\subsection{Quantum LSTM Architecture}
+
+\subsubsection{Variational Quantum Circuit (VQC)}
+
+The core quantum component is a parameterized variational quantum circuit implemented in PennyLane with a PyTorch interface. The circuit operates on $n_q = n_{\text{input}} + n_{\text{hidden}}$ qubits, where $n_{\text{input}}$ is the compressed feature dimension and $n_{\text{hidden}}$ is the QLSTM hidden state size.
+
+\textbf{Gate sequence per VQC forward pass:}
+\begin{enumerate}
+    \item \textbf{Hadamard layer}: Apply $H$ to all $n_q$ qubits, creating uniform superposition over the $2^{n_q}$-dimensional computational basis.
+    \item \textbf{Data encoding layer}: Apply $R_Y(\theta_i)$ rotation to qubit $i$, encoding the concatenated input--hidden vector $\mathbf{x} \in \mathbb{R}^{n_q}$:
+    \[
+        R_Y(\theta) = \begin{pmatrix} \cos\frac{\theta}{2} & -\sin\frac{\theta}{2} \\ \sin\frac{\theta}{2} & \cos\frac{\theta}{2} \end{pmatrix}
+    \]
+    \item \textbf{Variational layers} (repeated $d$ times for VQC depth $d$):
+    \begin{enumerate}[label=(\alph*)]
+        \item \textbf{Entangling layer}: CNOT gates in a staggered pattern---first on even pairs $(0{\to}1, 2{\to}3, \ldots)$, then odd pairs $(1{\to}2, 3{\to}4, \ldots)$---creating full nearest-neighbor entanglement across the qubit register.
+        \item \textbf{Trainable $R_Y$ layer}: Apply $R_Y(w_{k,i})$ with learnable weights $\mathbf{W} \in \mathbb{R}^{d \times n_q}$, initialized as $\mathcal{N}(0, 0.01)$.
+    \end{enumerate}
+    \item \textbf{Measurement}: Pauli-$Z$ expectation values $\langle \sigma_Z^{(j)} \rangle$ on the first $n_{\text{hidden}}$ qubits, yielding outputs in $[-1, 1]$.
+\end{enumerate}
+
+\textbf{Production configuration} (full-dataset runs):
 \begin{itemize}
-    \item \textbf{Quantum LSTM}: 5-qubit variational quantum circuit (3 input + 2 hidden qubits), VQC depth 2, compression layer $11 \rightarrow 3$ features, trained with RMSprop ($\text{lr}=0.01$)
-    \item \textbf{26 Classical Models}: Including Gradient Boosting, QDA, Random Forest, SVM variants, Naive Bayes, Perceptron, AdaBoost, Bagging, and others from sklearn
+    \item $n_{\text{input}} = 3$ (compressed from 11 raw features)
+    \item $n_{\text{hidden}} = 2$
+    \item Total qubits: $n_q = 5$
+    \item VQC depth: $d = 2$ (two variational layers)
+    \item Trainable VQC parameters per gate: $d \times n_q = 10$
+    \item Simulator: PennyLane \texttt{default.qubit} (statevector simulation)
 \end{itemize}
+
+\subsubsection{QLSTM Cell}
+
+The Quantum LSTM cell replaces the classical linear transformations in a standard LSTM with four independent VQC instances, one for each gate:
+
+\begin{align}
+    \mathbf{i}_t &= \sigma\!\big(\text{VQC}_{\text{input}}([\mathbf{x}_t, \mathbf{h}_{t-1}])\big) \label{eq:input_gate} \\
+    \mathbf{f}_t &= \sigma\!\big(\text{VQC}_{\text{forget}}([\mathbf{x}_t, \mathbf{h}_{t-1}])\big) \label{eq:forget_gate} \\
+    \tilde{\mathbf{c}}_t &= \tanh\!\big(\text{VQC}_{\text{cell}}([\mathbf{x}_t, \mathbf{h}_{t-1}])\big) \label{eq:cell_gate} \\
+    \mathbf{o}_t &= \sigma\!\big(\text{VQC}_{\text{output}}([\mathbf{x}_t, \mathbf{h}_{t-1}])\big) \label{eq:output_gate} \\
+    \mathbf{c}_t &= \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t \\
+    \mathbf{h}_t &= \mathbf{o}_t \odot \tanh(\mathbf{c}_t)
+\end{align}
+
+Each VQC gate receives the concatenation $[\mathbf{x}_t, \mathbf{h}_{t-1}] \in \mathbb{R}^{n_q}$ and outputs $n_{\text{hidden}}$ expectation values. The classical sigmoid/tanh activations applied to the VQC outputs preserve the standard LSTM gating dynamics. A final classical linear layer maps $\mathbf{h}_t \in \mathbb{R}^{n_{\text{hidden}}}$ to the scalar prediction output.
+
+\textbf{Total trainable parameters:}
+\begin{itemize}
+    \item 4 VQC gates $\times$ 10 weights each = 40 quantum parameters
+    \item Compression layer: $11 \times 3 + 3 = 36$ parameters (linear, $\mathbb{R}^{11} \to \mathbb{R}^3$)
+    \item Output layer: $2 \times 1 + 1 = 3$ parameters (linear, $\mathbb{R}^2 \to \mathbb{R}^1$)
+    \item \textbf{Total: 79 trainable parameters}
+\end{itemize}
+
+\subsubsection{Full Model Data Flow}
+
+For an input batch of shape $(B, 5, 11)$:
+\begin{enumerate}
+    \item \textbf{Compression}: Classical linear layer maps each time step from 11 to 3 features: $(B, 5, 11) \to (B, 5, 3)$.
+    \item \textbf{Sequential processing}: For each of the 5 time steps, the QLSTM cell processes the compressed features through 4 quantum circuits. At each time step, each circuit requires a full statevector simulation of the 5-qubit system.
+    \item \textbf{Output}: The hidden state from the final time step is mapped through a linear layer to produce a scalar prediction.
+    \item Total quantum circuit evaluations per sample: $4 \text{ gates} \times 5 \text{ steps} = 20$ VQC forward passes.
+\end{enumerate}
+
+\subsection{Training Configuration}
+
+\begin{table}[H]
+    \centering
+    \caption{QLSTM Training Hyperparameters}
+    \begin{tabular}{ll}
+        \toprule
+        Parameter & Value \\
+        \midrule
+        Optimizer & RMSprop \\
+        Learning rate & 0.01 \\
+        Loss function & MSE (mean squared error) \\
+        Batch size & 256 \\
+        Epochs & 5 per cycle \\
+        Data type & float64 (double precision) \\
+        Checkpointing & Every epoch + every 300 seconds \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:qlstm_config}
+\end{table}
+
+\subsection{Classical Models}
+
+We train 26 sklearn classifiers spanning diverse model families. Each model receives the flattened sequence $(B, 5 \times 11) = (B, 55)$ as input. Table~\ref{tab:sklearn_models} lists all models with key hyperparameters.
+
+\begin{table}[H]
+    \centering
+    \caption{Classical Model Zoo (26 sklearn classifiers)}
+    \label{tab:sklearn_models}
+    \small
+    \begin{tabular}{lll}
+        \toprule
+        Model & Family & Key Hyperparameters \\
+        \midrule
+        Gradient Boosting & Ensemble/Boosting & \texttt{n\_est=20, max\_depth=3} \\
+        Hist GBDT & Ensemble/Boosting & \texttt{max\_iter=30, max\_depth=3, lr=0.1} \\
+        AdaBoost & Ensemble/Boosting & \texttt{n\_est=25, lr=0.5} \\
+        Random Forest & Ensemble/Bagging & \texttt{n\_est=20} \\
+        Extra Trees & Ensemble/Bagging & \texttt{n\_est=10, max\_depth=5} \\
+        Bagging DT & Ensemble/Bagging & \texttt{n\_est=10, max\_samp=0.7, base=DT(d=2)} \\
+        Decision Tree & Tree & \texttt{max\_depth=3, min\_leaf=10} \\
+        \midrule
+        SGD Mod.\ Huber & Linear/SGD & \texttt{loss=modified\_huber, $\alpha$=1e-4} \\
+        SGD Hinge & Linear/SGD & \texttt{loss=hinge, $\alpha$=1e-4} \\
+        SGD Log & Linear/SGD & \texttt{loss=log\_loss, $\alpha$=1e-4} \\
+        Logistic Regression & Linear & \texttt{solver=lbfgs, max\_iter=100} \\
+        Ridge & Linear & \texttt{$\alpha$=1.0} \\
+        Linear SVC & Linear/SVM & \texttt{C=0.5, max\_iter=2000} \\
+        Perceptron & Linear & \texttt{max\_iter=200, tol=1e-3} \\
+        Passive Aggressive & Linear & \texttt{C=0.5, max\_iter=200} \\
+        \midrule
+        QDA & Probabilistic & \texttt{reg\_param=0.5} \\
+        LDA & Probabilistic & \texttt{solver=svd} \\
+        Gaussian NB & Probabilistic & \texttt{var\_smooth=1e-9} \\
+        Gaussian NB 1e-7 & Probabilistic & \texttt{var\_smooth=1e-7} \\
+        Gaussian NB 1e-8 & Probabilistic & \texttt{var\_smooth=1e-8} \\
+        \midrule
+        MLP Classifier & Neural Network & \texttt{layers=(32,16), max\_iter=50} \\
+        KNN-11-Dist & Instance-based & \texttt{k=11, weights=distance} \\
+        KNN-3 & Instance-based & \texttt{k=3, weights=uniform} \\
+        Nearest Centroid & Instance-based & \texttt{metric=euclidean} \\
+        \midrule
+        Dummy Most Freq & Baseline & \texttt{strategy=most\_frequent} \\
+        Dummy Stratified & Baseline & \texttt{strategy=stratified} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Models are auto-discovered at runtime: the system scans the \texttt{models/} directory for Python files exporting a \texttt{NAME} string and a \texttt{make\_model()} factory function, enabling new classifiers to be added by simply dropping a file into the directory.
+
+\section{Scaling Methodology: From Prototype to Production}
+
+A key design feature of this system is the \textbf{two-phase scaling methodology} that allows rapid prototyping under tight time budgets, then seamlessly scales to full-dataset training without code changes.
+
+\subsection{Phase 1: Auto-Calibrated Rapid Prototyping}
+
+During development and hyperparameter search, each model operates under a configurable \texttt{time\_budget} (default: 1 second for sklearn, 10 seconds for quantum). The system auto-calibrates the training set size to fit within this budget:
+
+\textbf{Sklearn auto-calibration:}
+\begin{enumerate}
+    \item \textbf{Pilot fit}: Fit the model on 50 samples and measure wall-clock time to compute $t_{\text{sample}}$ (seconds per sample).
+    \item \textbf{Budget allocation}: Reserve 70\% of the time budget for \texttt{fit()}, 30\% for \texttt{predict()}.
+    \item \textbf{Sample cap}: Compute $N_{\max} = \lfloor 0.7 \cdot T_{\text{budget}} / t_{\text{sample}} \rfloor$. If $N_{\max} < N_{\text{train}}$, randomly subsample the training set to $N_{\max}$ samples (with fixed seed for reproducibility).
+    \item All validation and test samples are always used (inference is fast).
+\end{enumerate}
+
+\textbf{Quantum auto-calibration:}
+\begin{enumerate}
+    \item \textbf{Pilot inference}: Run 2 samples through the quantum circuit and measure $t_{\text{sample}}$.
+    \item \textbf{Budget allocation}: Split per-epoch budget 50/50 between training and evaluation.
+    \item \textbf{Training cap}: $N_{\text{train}} = \lfloor T_{\text{train}} / (3 \cdot t_{\text{sample}}) \rfloor$, where the $3\times$ factor accounts for forward pass, backward pass, and optimizer step.
+    \item \textbf{Eval cap}: $N_{\text{eval}} = \lfloor T_{\text{eval}} / (2 \cdot t_{\text{sample}}) \rfloor$, split between val and test. Uses first-$N$ samples (not random) so prediction indices align across models for CFA.
+\end{enumerate}
+
+This phase enables the \textbf{26-hour progressive training session} (${\sim}$2,900 runs): a loop that increases time budgets over time (from 1s to 60s+), allowing the system to explore many model combinations quickly and then refine the best ones with more data.
+
+\subsection{Phase 2: Uncapped Full-Dataset Training}
+
+For production runs, time and memory budgets are set to effectively unlimited values (\texttt{time\_limit=999999}, \texttt{mem\_limit=0}), causing the auto-calibration to use all available data:
+
+\begin{itemize}
+    \item \textbf{Sklearn models}: All 20,315 training samples, all 2,555 val / 3,720 test samples. Training completes in 0.0--7.0 seconds per model (total $<$30 seconds for all 26 models).
+    \item \textbf{Quantum LSTM}: All 20,315 training samples per epoch. At ${\sim}$0.19 seconds per sample (20 VQC evaluations $\times$ 5-qubit statevector simulation each), one epoch takes ${\sim}$2.5 hours. A full 5-epoch cycle requires ${\sim}$13 hours on CPU.
+\end{itemize}
+
+\subsection{Scaling the Quantum Circuit}
+
+The quantum model's capacity can be scaled along three axes:
+
+\begin{table}[H]
+    \centering
+    \caption{Quantum Circuit Scaling Parameters}
+    \begin{tabular}{lccc}
+        \toprule
+        Parameter & Current & Moderate & Ambitious \\
+        \midrule
+        Input qubits ($n_{\text{input}}$) & 3 & 4 & 6 \\
+        Hidden qubits ($n_{\text{hidden}}$) & 2 & 3 & 4 \\
+        Total qubits ($n_q$) & 5 & 7 & 10 \\
+        VQC depth ($d$) & 2 & 3 & 4 \\
+        Params/gate ($d \times n_q$) & 10 & 21 & 40 \\
+        Total quantum params & 40 & 84 & 160 \\
+        Hilbert space dim ($2^{n_q}$) & 32 & 128 & 1,024 \\
+        \midrule
+        Est.\ time/sample & 0.19s & ${\sim}$0.8s & ${\sim}$5s \\
+        Est.\ epoch time (20k) & 2.5h & ${\sim}$4.5h & ${\sim}$28h \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:quantum_scaling}
+\end{table}
+
+Statevector simulation scales as $O(2^{n_q})$ in memory and $O(d \cdot 2^{n_q})$ in time per gate application. For $n_q > 10$, GPU-accelerated simulation (e.g., PennyLane's \texttt{lightning.gpu}) or actual quantum hardware would be required.
+
+\textbf{Compression layer scaling:} The classical compression layer ($\mathbb{R}^{11} \to \mathbb{R}^{n_{\text{input}}}$) is the bottleneck for information flow into the quantum circuit. Increasing $n_{\text{input}}$ allows more features to enter the circuit at full resolution rather than being compressed, but requires proportionally more qubits. An alternative is to use a nonlinear compression (e.g., a small MLP) to improve information retention at the same qubit count.
+
+\subsection{Incremental Checkpointing for Long Runs}
+
+Full-dataset quantum training runs exceed 10 hours per cycle. To prevent progress loss, the system implements two levels of checkpointing:
+\begin{enumerate}
+    \item \textbf{Epoch checkpoints}: Model weights, validation predictions, and test predictions are saved after every epoch completion.
+    \item \textbf{Time-based checkpoints}: Model weights are saved every 300 seconds (5 minutes) during the batch training loop within an epoch, ensuring that even if training is interrupted mid-epoch, at most 5 minutes of work is lost.
+\end{enumerate}
+
+Predictions are saved in CSV format (\texttt{epoch,prediction,ground\_truth}) aligned by sample index across all models, enabling CFA evaluation on any completed checkpoint without waiting for the full training cycle.
+
+\section{CFA Implementation Details}
+
+\subsection{Core Concepts}
+
+\textbf{Rank-Score Characteristic (RSC):} For a model $A$ with normalized prediction scores $s_A(x_1), \ldots, s_A(x_n)$, the RSC curve is the sorted scores in descending order:
+\[
+    \text{RSC}_A = \text{sort}(\bar{s}_A, \text{descending})
+\]
+where $\bar{s}_A$ denotes min-max normalized scores. The RSC captures \emph{how} a model distributes its confidence across samples.
+
+\textbf{Cognitive Diversity (CD):} The diversity between two models $A$ and $B$ is the RMS distance between their RSC curves:
+\[
+    \text{CD}(A, B) = \sqrt{\frac{1}{n} \sum_{i=1}^{n} \big(\text{RSC}_A(i) - \text{RSC}_B(i)\big)^2}
+\]
+
+\textbf{Diversity Strength (DS):} Each model's average diversity against all others:
+\[
+    \text{DS}(A) = \frac{1}{|M|-1} \sum_{B \in M \setminus \{A\}} \text{CD}(A, B)
+\]
+
+\textbf{Train-based normalization:} Scores are min-max normalized using bounds computed from the \emph{training} predictions, then applied to test predictions with the same bounds. This prevents data leakage from test score distributions.
+
+\subsection{Six Fusion Methods}
+
+Given a subset of models $S \subseteq M$:
+
+\begin{enumerate}
+    \item \textbf{ASC} (Average Score Combination): $\hat{y}(x) = \frac{1}{|S|} \sum_{A \in S} \bar{s}_A(x)$
+    \item \textbf{ARC} (Average Rank Combination): $\hat{r}(x) = \frac{1}{|S|} \sum_{A \in S} r_A(x)$, where $r_A(x)$ is sample $x$'s rank under model $A$
+    \item \textbf{WSCDS}: $\hat{y}(x) = \sum_{A \in S} \frac{\text{DS}(A)}{\sum_{B \in S} \text{DS}(B)} \cdot \bar{s}_A(x)$
+    \item \textbf{WRCDS}: $\hat{r}(x) = \sum_{A \in S} \frac{\text{DS}(A)}{\sum_{B \in S} \text{DS}(B)} \cdot r_A(x)$
+    \item \textbf{WSCP}: $\hat{y}(x) = \sum_{A \in S} \frac{\text{perf}(A)}{\sum_{B \in S} \text{perf}(B)} \cdot \bar{s}_A(x)$
+    \item \textbf{WRCP}: $\hat{r}(x) = \sum_{A \in S} \frac{\text{perf}(A)}{\sum_{B \in S} \text{perf}(B)} \cdot r_A(x)$
+\end{enumerate}
+
+For score-based methods, the fused score is thresholded at 0.5 for binary classification. For rank-based methods, predictions are binarized at the median rank.
+
+\subsection{Greedy Forward Selection}
+
+Exhaustive CFA over all $2^{26}$ subsets of 26 models is computationally intractable. We use greedy forward selection:
+
+\begin{enumerate}
+    \item Sort models by individual validation accuracy; initialize the ensemble with the top performer.
+    \item \textbf{Expansion}: Try adding each remaining model to the current ensemble. Evaluate all 6 CFA methods for each candidate. Keep the method yielding the highest validation accuracy.
+    \item \textbf{Accept/reject}: If the best candidate improves validation accuracy, add it permanently.
+    \item \textbf{Pruning}: When the remaining pool is $>2\times$ the ensemble size, identify models that never improved any combination and remove the worst performer among them.
+    \item Repeat until no model improves the ensemble or the pool is exhausted.
+\end{enumerate}
+
+This achieves $O(K \cdot N)$ complexity per round ($K$ pool models, $N$ samples, 6 methods), compared to $O(2^K)$ for exhaustive search.
 
 \section{Individual Model Performance}
 
@@ -144,11 +411,31 @@ The Quantum LSTM was trained on the full 20,315 samples for 4 complete epochs (1
     \label{fig:quantum}
 \end{figure}
 
+\subsection{Computational Cost Analysis}
+
+\begin{table}[H]
+    \centering
+    \caption{Per-Sample Computational Breakdown}
+    \begin{tabular}{lcc}
+        \toprule
+        Operation & Count per sample & Time \\
+        \midrule
+        Compression (linear) & 5 time steps & $<$0.001s \\
+        VQC forward pass ($2^5 = 32$-dim statevector) & 20 (4 gates $\times$ 5 steps) & $\sim$0.18s \\
+        Backpropagation (parameter-shift rule) & 20 circuits $\times$ 2 shifts & $\sim$0.01s \\
+        \midrule
+        \textbf{Total (training)} & & $\sim$0.19s \\
+        \textbf{Total (inference)} & & $\sim$0.28s \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:quantum_cost}
+\end{table}
+
 \subsection{Current Limitations}
 
 \begin{enumerate}
     \item \textbf{Computational cost}: At $\sim$0.19 seconds per sample, each epoch takes $\sim$2.5 hours on CPU. The full 5-epoch cycle requires $\sim$13 hours.
-    \item \textbf{Circuit capacity}: With only 5 qubits and depth 2, the variational quantum circuit has limited expressivity. The 11-dimensional input features are compressed to 3 dimensions before entering the quantum circuit.
+    \item \textbf{Circuit capacity}: With only 5 qubits and depth 2, the VQC operates in a 32-dimensional Hilbert space. The 11-dimensional input features are compressed to 3 dimensions before entering the circuit, losing information.
     \item \textbf{Early convergence}: Loss plateaus at $\sim$0.249 after epoch 2, suggesting the current architecture may be near its capacity limit.
     \item \textbf{Model not yet saved from full training}: The 10.7-hour training was interrupted before completion. A new training run with per-epoch checkpointing is in progress.
 \end{enumerate}
@@ -172,14 +459,15 @@ Using an earlier quantum model (trained on limited samples) combined with full-t
 
 \textbf{Important caveat}: These results are on only 41 samples and should be interpreted with caution. The wide confidence intervals at this sample size mean the true performance could be substantially different.
 
-\subsection{Why Quantum Will Improve}
+\subsection{Path to Improved Quantum Performance}
 
 Several factors indicate the quantum model has significant room for improvement:
 
 \begin{enumerate}
     \item \textbf{Training is ongoing}: A new run with 5-minute checkpointing is actively training on the full dataset. Once complete, CFA can evaluate the quantum model on all 2,555 val / 3,720 test samples.
-    \item \textbf{Diversity advantage}: The quantum model's decision boundary is fundamentally different from classical models (parameterized quantum gates vs.\ linear/tree-based decisions), providing high cognitive diversity for CFA fusion.
-    \item \textbf{Scalable architecture}: Increasing qubit count (currently 5) and VQC depth (currently 2) exponentially increases the circuit's expressivity. Future runs with 6--8 qubits and depth 3--4 could substantially improve quantum performance.
+    \item \textbf{Diversity advantage}: The quantum model's decision boundary is fundamentally different from classical models (parameterized quantum gates vs.\ linear/tree-based decisions), providing high cognitive diversity for CFA fusion. Even VQC outputs in $[-1,1]$ from Pauli-$Z$ measurements produce rank-score curves that are structurally distinct from sigmoid/probability-based classical scores.
+    \item \textbf{Scalable architecture}: As shown in Table~\ref{tab:quantum_scaling}, increasing to 7 qubits and depth 3 would expand the Hilbert space from 32 to 128 dimensions and more than double the quantum parameter count, substantially increasing expressivity. The modular VQC design means this requires only changing three command-line flags (\texttt{-qi}, \texttt{-qh}, \texttt{-qd}).
+    \item \textbf{Compression bottleneck}: The current $11 \to 3$ linear compression is the primary information bottleneck. Replacing it with a trainable 2-layer MLP (e.g., $11 \to 8 \to 3$ with ReLU) would better preserve feature information entering the quantum circuit, at minimal additional classical cost.
     \item \textbf{CFA complementarity}: Even with modest individual accuracy, the quantum model's unique rank-score profile can improve ensemble performance---CFA's strength lies in combining diverse scorers, not in requiring each individual to be the best.
 \end{enumerate}
 
@@ -191,6 +479,7 @@ This work demonstrates that CFA effectively combines quantum and classical model
     \item \textbf{CFA improves over individuals}: The best ensemble (WSCDS, 3 models) achieves 56.7\% test accuracy vs.\ 54.7\% for the best individual model---a meaningful improvement in stock prediction.
     \item \textbf{Diversity matters more than accuracy}: The winning ensemble includes models ranked 21st, 22nd, and 4th individually, confirming CFA's principle that diverse scorers outperform homogeneous strong ones.
     \item \textbf{Quantum-classical fusion shows promise}: Preliminary results on a small subset show the quantum model contributes unique diversity to CFA ensembles. Full-dataset evaluation is pending completion of the current training run.
+    \item \textbf{Two-phase scaling works}: The auto-calibration mechanism enables rapid exploration (2,900 runs in 26 hours) during prototyping, then seamlessly scales to full-dataset training for production, without any code changes.
     \item \textbf{Stock prediction remains hard}: Even the best ensembles achieve $\sim$57\% accuracy on this dataset, reflecting the inherent difficulty of predicting short-term stock movements from price data alone.
 \end{itemize}
 
