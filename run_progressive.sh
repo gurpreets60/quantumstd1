@@ -15,7 +15,9 @@ TIME_LIMITS=(1 2 5 10 20 30 60 120 300 600 1200 1800 3600)
 MAX_IDX=$(( ${#TIME_LIMITS[@]} - 1 ))
 IDX=0
 
-trap 'echo ""; echo "=== Stopped after run $RUN, time_limit=${TL}s ($(( $(date +%s) - START ))s elapsed) ==="; exit 0' INT TERM
+PIDFILE="data/.progressive.pid"
+echo $$ > "$PIDFILE"
+trap 'echo ""; echo "=== Stopped after run $RUN, time_limit=${TL}s ($(( $(date +%s) - START ))s elapsed) ==="; rm -f "$PIDFILE"; exit 0' INT TERM EXIT
 
 echo "=== Progressive Training (expanding time limits) ==="
 echo "Start: $(date)"
