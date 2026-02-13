@@ -252,4 +252,5 @@ class QuantumTrainer:
             if all_val_rows:
                 summary.save_predictions('QUANTUM LSTM', 'val', np.vstack(all_val_rows))
                 summary.save_predictions('QUANTUM LSTM', 'test', np.vstack(all_tes_rows))
+            summary.save_model('QUANTUM LSTM', self.model.state_dict())
         return best_valid_perf, best_test_perf

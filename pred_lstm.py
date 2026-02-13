@@ -73,6 +73,18 @@ class RunSummary:
         safe_name = model_name.replace(' ', '_')
         return os.path.join(self.run_dir, 'pred_%s_%s.csv' % (safe_name, split))
 
+    def model_path(self, model_name):
+        safe_name = model_name.replace(' ', '_')
+        return os.path.join(self.run_dir, 'model_%s.pkl' % safe_name)
+
+    def save_model(self, model_name, model_obj):
+        """Save a trained model (sklearn estimator or torch state_dict)."""
+        import pickle
+        path = self.model_path(model_name)
+        with open(path, 'wb') as f:
+            pickle.dump(model_obj, f)
+        print(f'[{model_name}] Model saved to {path}')
+
     def save_predictions(self, model_name, split, data):
         """Save predictions to CSV, splitting into numbered files if over 99 MB."""
         path = self.predictions_path(model_name, split)

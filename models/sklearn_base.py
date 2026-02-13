@@ -137,4 +137,5 @@ class SklearnTrainer:
                                          np.vstack(all_val_rows))
                 summary.save_predictions(self.model_name, 'test',
                                          np.vstack(all_tes_rows))
+            summary.save_model(self.model_name, self.estimator)
         return best_valid_perf, best_test_perf
