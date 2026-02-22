@@ -1,10 +1,11 @@
 # quantumstd1
 
 Quantum and classical models for stock movement prediction. Auto-discovers all
-sklearn models in `models/` (128+), plus Quantum LSTM and Classical ALSTM. Fuses
-predictions with Combinatorial Fusion Analysis (CFA) using greedy forward
-selection to find the best ensemble. Each model is guarded by per-model RAM and
-time limits and monitored with live system stats (RAM, CPU, GPU, ETA).
+sklearn models in `models/` (128+), plus Quantum LSTM, two batch quantum models
+(Batch QLSTM and Batch VQFWP), and Classical ALSTM. Fuses predictions with
+Combinatorial Fusion Analysis (CFA) using greedy forward selection to find the
+best ensemble. Each model is guarded by per-model RAM and time limits and
+monitored with live system stats (RAM, CPU, GPU, ETA).
 
 ## Setup
 
@@ -25,6 +26,10 @@ uv run --python .venv/bin/python pred_lstm.py -o train -m sklearn
 
 # full pipeline: all sklearn + quantum (1 epoch) + classical (1 epoch)
 uv run --python .venv/bin/python pred_lstm.py -o train -m all -qe 1 -e 1 --time_limit 30
+
+# only the two batch quantum models
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum_batch --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
+./run_quantum_batch.sh 1 8 90
 
 # run CFA on previous results (instant, no training)
 uv run --python .venv/bin/python pred_lstm.py -o cfa
@@ -63,6 +68,7 @@ Use `-m` / `--model` to select which models to train:
 | `all` | All sklearn models + quantum + classical (default) |
 | `sklearn` | All auto-discovered sklearn models only |
 | `quantum` | Quantum LSTM only |
+| `quantum_batch` | Batch QLSTM + Batch VQFWP only |
 | `classical` | Classical ALSTM only |
 | `oom` | OOM Test (for verifying MemoryGuard) |
 
@@ -73,6 +79,7 @@ included -- no manual registration needed.
 ```bash
 uv run --python .venv/bin/python pred_lstm.py -o train -m sklearn
 uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qt 15 --time_limit 30
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum_batch --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
 uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10 --time_limit 0
 ```
 
@@ -412,6 +419,20 @@ size via pilot fit to stay within each model's time budget.
 Auto-calibrates by timing a pilot batch, then subsamples data to fit within
 the time budget.
 
+### Batch Quantum Models (QLSTM + VQFWP)
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--qbatch_epoch` | Epochs for both batch quantum models (0 to skip) | `0` |
+| `--qbatch_time` | Time budget in seconds for each batch quantum model | `8` |
+
+Use `-m quantum_batch` to run only these two models:
+
+```bash
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum_batch --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
+./run_quantum_batch.sh 1 8 90
+```
+
 ## Examples
 
 ```bash
@@ -426,6 +447,9 @@ uv run --python .venv/bin/python pred_lstm.py -o train -m classical -e 10 -v 1 -
 
 # Minimal quantum test (2 qubits, fastest possible)
 uv run --python .venv/bin/python pred_lstm.py -o train -m quantum -qe 1 -qi 1 -qh 1 -qd 1 -qt 5
+
+# Run only the two batch quantum models
+uv run --python .venv/bin/python pred_lstm.py -o train -m quantum_batch --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
 
 # Debug run (1 epoch each, all models)
 uv run --python .venv/bin/python pred_lstm.py -o train -m all -qe 1 -e 1 --time_limit 30

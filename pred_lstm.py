@@ -28,7 +28,14 @@ import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
-from models import AWLSTM, QuantumTrainer, OOMTestTrainer, SKLEARN_REGISTRY
+from models import (
+    AWLSTM,
+    BatchQLSTMTrainer,
+    BatchVQFWPTrainer,
+    OOMTestTrainer,
+    QuantumTrainer,
+    SKLEARN_REGISTRY,
+)
 
 
 
@@ -756,7 +763,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--action', type=str, default='train',
                         help='train, test, pred')
     parser.add_argument('-m', '--model', type=str, default='all',
-                        help='which model to run: all, sklearn, quantum, classical, oom')
+                        help='which model to run: all, sklearn, quantum, quantum_batch, classical, oom')
 
     parser.add_argument('-f', '--fix_init', type=int, default=0,
                         help='use fixed initialization')
@@ -780,6 +787,10 @@ if __name__ == '__main__':
                         help='quantum LSTM epochs (0 to skip)')
     parser.add_argument('-qt', '--qlstm_time', type=float, default=10.0,
                         help='time budget in seconds for quantum LSTM')
+    parser.add_argument('--qbatch_epoch', type=int, default=0,
+                        help='batch quantum model epochs (0 to skip)')
+    parser.add_argument('--qbatch_time', type=float, default=8.0,
+                        help='time budget in seconds for each batch quantum model')
     parser.add_argument('-t', '--timeout', type=int, default=0,
                         help='kill script after this many seconds (0=no limit)')
     parser.add_argument('--test_oom', type=int, default=0,
@@ -805,11 +816,17 @@ if __name__ == '__main__':
 
     # -m / --model selects which model(s) to run
     _MODEL_MAP = {
-        'quantum': 'QUANTUM LSTM', 'classical': 'CLASSICAL ALSTM', 'oom': 'TEST OOM',
+        'quantum': 'QUANTUM LSTM',
+        'quantum_batch': 'QUANTUM BATCH MODELS',
+        'classical': 'CLASSICAL ALSTM',
+        'oom': 'TEST OOM',
     }
 
     if args.model != 'all':
         key = args.model.lower()
+        requested_qlstm_epoch = args.qlstm_epoch
+        requested_qbatch_epoch = args.qbatch_epoch
+        requested_classical_epoch = args.epoch
         if key not in _MODEL_MAP and key not in ('sklearn',):
             print('ERROR: --model must be one of: all, sklearn, %s'
                   % ', '.join(_MODEL_MAP.keys()))
@@ -817,13 +834,16 @@ if __name__ == '__main__':
         args.test_oom = 0
         args.sklearn = 0
         args.qlstm_epoch = 0
+        args.qbatch_epoch = 0
         args.epoch = 0
         if key == 'sklearn':
             args.sklearn = 1
         elif key == 'quantum':
-            args.qlstm_epoch = max(args.qlstm_epoch, 1) or 1
+            args.qlstm_epoch = max(requested_qlstm_epoch, 1)
+        elif key == 'quantum_batch':
+            args.qbatch_epoch = max(requested_qbatch_epoch, 1)
         elif key == 'classical':
-            args.epoch = max(args.epoch, 1) or 150
+            args.epoch = max(requested_classical_epoch, 1)
         elif key == 'oom':
             args.test_oom = 1
 
@@ -902,6 +922,9 @@ if __name__ == '__main__':
 
         if args.qlstm_epoch > 0 and args.model in ('all', 'quantum'):
             summary.add_model('QUANTUM LSTM', args.qlstm_epoch)
+        if args.qbatch_epoch > 0 and args.model in ('all', 'quantum_batch'):
+            summary.add_model('QUANTUM BATCH QLSTM', args.qbatch_epoch)
+            summary.add_model('QUANTUM BATCH VQFWP', args.qbatch_epoch)
         if args.epoch > 0 and args.model in ('all', 'classical'):
             summary.add_model('CLASSICAL ALSTM', args.epoch)
         summary.print()
@@ -968,6 +991,38 @@ if __name__ == '__main__':
             _run_model('QUANTUM LSTM', qt.train, summary, args.mem_limit,
                        args.time_limit)
             del qt
+            gc.collect()
+
+        # Batch quantum models (if epochs > 0)
+        if args.qbatch_epoch > 0 and args.model in ('all', 'quantum_batch'):
+            qbatch_qlstm = BatchQLSTMTrainer(
+                tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
+                val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
+                tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
+                epochs=args.qbatch_epoch,
+                batch_size=args.batch_size,
+                lr=args.learning_rate,
+                hinge=(args.hinge_lose == 1),
+                time_budget=args.qbatch_time,
+            )
+            _run_model('QUANTUM BATCH QLSTM', qbatch_qlstm.train, summary,
+                       args.mem_limit, args.time_limit)
+            del qbatch_qlstm
+            gc.collect()
+
+            qbatch_vqfwp = BatchVQFWPTrainer(
+                tra_pv=pure_LSTM.tra_pv, tra_gt=pure_LSTM.tra_gt,
+                val_pv=pure_LSTM.val_pv, val_gt=pure_LSTM.val_gt,
+                tes_pv=pure_LSTM.tes_pv, tes_gt=pure_LSTM.tes_gt,
+                epochs=args.qbatch_epoch,
+                batch_size=args.batch_size,
+                lr=args.learning_rate,
+                hinge=(args.hinge_lose == 1),
+                time_budget=args.qbatch_time,
+            )
+            _run_model('QUANTUM BATCH VQFWP', qbatch_vqfwp.train, summary,
+                       args.mem_limit, args.time_limit)
+            del qbatch_vqfwp
             gc.collect()
 
         # Classical ALSTM

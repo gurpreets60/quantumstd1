@@ -6,6 +6,8 @@ import pkgutil
 # Explicit imports for non-sklearn models
 from .classical_alstm import AWLSTM
 from .quantum_lstm import QuantumTrainer
+from .QLSTM_v0_Batch import BatchQLSTMTrainer
+from .vqFWP_Batch_time_series import BatchVQFWPTrainer
 from .test_oom import OOMTestTrainer
 
 # Auto-discover all SklearnTrainer subclasses from .py files in this directory.
@@ -18,7 +20,8 @@ SKLEARN_REGISTRY = {}  # model_name -> class
 
 _pkg_dir = os.path.dirname(__file__)
 _skip = {'__init__', 'sklearn_base', 'monitor', 'cfa', 'classical_alstm',
-         'quantum_lstm', 'test_oom'}
+         'quantum_lstm', 'QLSTM_v0_Batch', 'vqFWP_Batch_time_series',
+         'test_oom'}
 
 for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
     if _name in _skip:

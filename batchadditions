@@ -1,0 +1,24 @@
+- Replaced models/QLSTM_v0_Batch.py with a pipeline-compatible trainer class (BatchQLST15:41 [5/456] 
+    that now:                                                                                          
+      - takes the stock dataset tensors (tra_pv/tra_gt/val_pv/val_gt/tes_pv/tes_gt),                   
+      - trains in mini-batches,                                                                        
+      - uses small default params for speed,                                                           
+      - auto-caps sample counts by a time budget,                                                      
+      - reports metrics and saves predictions/models like other trainers.                              
+  - Replaced models/vqFWP_Batch_time_series.py with a similar pipeline-compatible trainer              
+    (BatchVQFWPTrainer) with the same dataset/training/saving behavior and lightweight defaults.       
+  - Updated models/__init__.py to export both new batch trainers and avoid sklearn auto-discovery      
+    trying to treat those files as sklearn models.                                                     
+  - Updated pred_lstm.py to wire both models into the normal training flow:                            
+      - new model mode: -m quantum_batch                                                               
+      - new args: --qbatch_epoch, --qbatch_time                                                        
+      - both models now run under existing MemoryGuard, TimeGuard, RunSummary, and CFA flow.           
+  - Added new root script run_quantum_batch.sh to run only the two batch quantum models easily.        
+  - Updated README.md with:                                                                            
+      - quantum_batch mode in model selection,                                                         
+      - new batch-quantum flags,                                                                       
+      - exact commands to run only those two models,                                                   
+      - helper script usage.                                                                           
+  - Verified end-to-end with a smoke run:                                                              
+      - both batch quantum models trained, saved outputs, and CFA executed successfully in data/       
+        run_20260222_153702.          
