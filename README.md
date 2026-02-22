@@ -24,8 +24,8 @@ uv pip install --python .venv/bin/python tensorflow tf-keras scikit-learn scipy 
 # all sklearn models (auto-discovered, fast with default 1s time limit)
 uv run --python .venv/bin/python pred_lstm.py -o train -m sklearn
 
-# full pipeline: all sklearn + quantum (1 epoch) + classical (1 epoch)
-uv run --python .venv/bin/python pred_lstm.py -o train -m all -qe 1 -e 1 --time_limit 30
+# run all model families: sklearn + quantum + batch quantum + classical
+uv run --python .venv/bin/python pred_lstm.py -o train -m all -qe 1 --qbatch_epoch 1 -e 1 -qt 10 --qbatch_time 8 --time_limit 90
 
 # only the two batch quantum models
 uv run --python .venv/bin/python pred_lstm.py -o train -m quantum_batch --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
