@@ -2,12 +2,18 @@
 Model auto-discovery for the image classification pipeline.
 
 Any .py file in models/ that defines a BaseModel subclass is automatically
-found and registered here — no manual imports needed. To add a new model,
-just create models/your_model.py with a class that extends BaseModel.
+found and registered — no manual imports needed.
 
-Usage:
-    from models import get_models
-    models = get_models("all", args)   # returns list of BaseModel instances
+Model flags (-m):
+  all      -- every discovered model
+  sklearn  -- all non-PyTorch models (classical ML + pipelines)
+  deep     -- all TorchModel subclasses (PyTorch deep learning)
+  rf       -- Random Forest
+  cnn      -- original CNN
+  svm      -- all SVM variants
+  knn      -- all KNN variants
+  mlp      -- all MLP variants
+  <name>   -- any case-insensitive prefix of a class name
 """
 
 import pkgutil
@@ -16,25 +22,19 @@ import inspect
 from pathlib import Path
 from .base import BaseModel
 
+# Modules that define abstract bases, not concrete models
+_SKIP = {"base", "torch_base"}
+
 
 def _discover_models() -> dict:
-    """
-    Scan the models/ directory for all BaseModel subclasses.
-
-    Uses pkgutil to iterate modules (same approach as quantumstd1).
-    Returns dict {ClassName: class}.
-    """
-    registry = {}
+    """Scan models/ for all concrete BaseModel subclasses. Returns {ClassName: class}."""
+    registry   = {}
     models_dir = str(Path(__file__).parent)
 
     for _, module_name, _ in pkgutil.iter_modules([models_dir]):
-        if module_name == "base":
-            continue  # skip the abstract base class itself
-
-        # Dynamically import each module in models/
+        if module_name in _SKIP:
+            continue
         module = importlib.import_module(f".{module_name}", package=__name__)
-
-        # Find all classes in the module that subclass BaseModel
         for name, obj in inspect.getmembers(module, inspect.isclass):
             if issubclass(obj, BaseModel) and obj is not BaseModel:
                 registry[name] = obj
@@ -42,54 +42,61 @@ def _discover_models() -> dict:
     return registry
 
 
-# Maps --model flag values to class name prefixes for filtering
-_FLAG_MAP = {
-    "rf":  "RandomForest",   # e.g. RandomForestModel
-    "cnn": "CNN",            # e.g. CNNModel
-    "all": None,             # all discovered models
-}
+def _torch_base():
+    """Return TorchModel class (or None if not yet created)."""
+    try:
+        from .torch_base import TorchModel
+        return TorchModel
+    except ImportError:
+        return None
 
 
 def get_models(model_flag: str, args) -> list:
     """
-    Return instantiated model objects based on the --model CLI flag.
+    Return instantiated models based on the --model flag.
 
-    Passes relevant hyperparameters from args (e.g. --epochs for CNN).
-
-    Args:
-        model_flag: "rf", "cnn", or "all"
-        args:       argparse Namespace (used to pass hyperparams to models)
-
-    Returns:
-        List of BaseModel instances, ready to call .train() on.
+    Passes epochs= to any model whose __init__ accepts it (all TorchModel subclasses).
+    Uses case-insensitive prefix matching so -m svm matches SVMRBFModel, etc.
     """
-    registry = _discover_models()
+    registry   = _discover_models()
+    TorchModel = _torch_base()
+    flag       = model_flag.lower()
 
-    # Filter registry based on the flag
-    if model_flag == "all":
+    # Category flags
+    if flag == "all":
         selected = registry
-    elif model_flag in _FLAG_MAP:
-        prefix = _FLAG_MAP[model_flag]
-        selected = {k: v for k, v in registry.items() if k.startswith(prefix)}
+
+    elif flag == "sklearn":
+        # Non-PyTorch models only
+        selected = {k: v for k, v in registry.items()
+                    if TorchModel is None or not issubclass(v, TorchModel)}
+
+    elif flag == "deep":
+        # PyTorch TorchModel subclasses only
+        selected = {k: v for k, v in registry.items()
+                    if TorchModel is not None and issubclass(v, TorchModel)}
+
     else:
-        # Allow passing a class name directly (e.g. -m RandomForestModel)
-        selected = {k: v for k, v in registry.items() if k.lower() == model_flag.lower()}
+        # Case-insensitive prefix match: -m svm -> SVMRBFModel, SVMLinearModel, ...
+        selected = {k: v for k, v in registry.items()
+                    if k.lower().startswith(flag)}
 
     if not selected:
         raise ValueError(
-            f"No models match '{model_flag}'. "
-            f"Available: {list(registry.keys())} or flags: {list(_FLAG_MAP.keys())}"
+            f"No models match '{model_flag}'.\n"
+            f"Flags: all, sklearn, deep\n"
+            f"Prefixes: rf, cnn, svm, knn, mlp, lda, qda, pca, rbm, fft, "
+            f"lenet, resnet, densenet, mobilenet, lstm, patch, autoencoder, "
+            f"vae, simclr, randomfilter, capsnet, ...\n"
+            f"All classes: {sorted(registry.keys())}"
         )
 
-    # Instantiate each model class, wiring in hyperparams from args
+    # Instantiate: pass epochs= only if the constructor accepts it
     instances = []
-    for name, cls in selected.items():
-        if "CNN" in name:
-            # Pass epochs from --epochs flag; CNN reads it at construction time
-            instances.append(cls(epochs=args.epochs))
-        else:
-            # sklearn-based models use their own defaults
-            instances.append(cls())
+    for name, cls in sorted(selected.items()):
+        sig    = inspect.signature(cls.__init__)
+        kwargs = {"epochs": args.epochs} if "epochs" in sig.parameters else {}
+        instances.append(cls(**kwargs))
 
-    print(f"Models to run: {[m.name for m in instances]}")
+    print(f"Models to run ({len(instances)}): {[m.name for m in instances]}")
     return instances
