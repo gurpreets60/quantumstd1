@@ -1,0 +1,2 @@
+model,train_acc,test_acc,train_time_s,status
+RANDOM_FOREST,0.9992,0.968,2.57,DONE

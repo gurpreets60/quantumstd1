@@ -1,0 +1,120 @@
+Batch Quantum Parameter Tuning Guide
+===================================
+
+This file explains how to tune the two batch quantum models:
+- QUANTUM BATCH QLSTM
+- QUANTUM BATCH VQFWP
+
+Run target
+----------
+Use this mode to run both models together:
+
+  uv run --python .venv/bin/python pred_lstm.py \
+    -o train -m quantum_batch \
+    --qbatch_epoch 1 --qbatch_time 8 --time_limit 90
+
+Shortcut script:
+
+  ./run_quantum_batch.sh 1 8 90
+
+Main knobs (start here)
+-----------------------
+1) --qbatch_epoch
+- What it controls: number of training epochs for both batch quantum models.
+- Bigger: more learning, slower.
+- Smaller: faster, less stable metrics.
+- Start: 1
+- Typical range: 1 to 5
+
+2) --qbatch_time
+- What it controls: inner time budget used by each batch quantum trainer to
+  auto-cap train/val/test sample counts.
+- Bigger: more samples kept, slower.
+- Smaller: fewer samples, faster.
+- Start: 8
+- Typical range: 5 to 60
+
+3) --time_limit
+- What it controls: outer TimeGuard kill limit for each model.
+- Must be larger than actual model runtime, or model gets killed.
+- Start: 90
+- Typical range: 60 to 600
+
+4) -b / --batch_size
+- What it controls: mini-batch size during training.
+- Bigger: fewer optimizer steps, may be faster.
+- Smaller: lower memory spikes, often slower.
+- Start: 1024 (project default)
+- Typical range: 128 to 1024
+
+5) -r / --learning_rate
+- What it controls: optimizer step size.
+- Bigger: faster changes, can become unstable.
+- Smaller: steadier, may need more epochs.
+- Start: 0.01
+- Typical range: 0.001 to 0.02
+
+Fast presets
+------------
+A) Smoke test (quick sanity check)
+
+  uv run --python .venv/bin/python pred_lstm.py \
+    -o train -m quantum_batch \
+    --qbatch_epoch 1 --qbatch_time 3 --time_limit 60
+
+B) Balanced default (good first real run)
+
+  uv run --python .venv/bin/python pred_lstm.py \
+    -o train -m quantum_batch \
+    --qbatch_epoch 2 --qbatch_time 10 --time_limit 120
+
+C) Higher quality (slower)
+
+  uv run --python .venv/bin/python pred_lstm.py \
+    -o train -m quantum_batch \
+    --qbatch_epoch 4 --qbatch_time 30 --time_limit 300
+
+Tuning order (recommended)
+--------------------------
+Step 1: Find safe runtime envelope
+- Keep --qbatch_epoch=1
+- Increase --qbatch_time until runtime is acceptable.
+- Set --time_limit comfortably above observed runtime.
+
+Step 2: Increase learning depth
+- Raise --qbatch_epoch from 1 -> 2 -> 3.
+- Stop increasing when val metrics stop improving consistently.
+
+Step 3: Adjust learning rate only if needed
+- If unstable/noisy training: lower -r to 0.005 or 0.001.
+- If too slow to improve: try 0.02 with caution.
+
+Step 4: Adjust batch size only for speed/memory
+- If memory pressure: lower -b to 256 or 128.
+- If stable and CPU has room: try larger batch (512/1024).
+
+How to interpret bad outcomes
+-----------------------------
+1) Model gets killed by TimeGuard
+- Increase --time_limit.
+- Or lower --qbatch_time / --qbatch_epoch.
+
+2) Metrics look random (~0.50 acc) and unstable
+- Increase --qbatch_time first (more samples).
+- Then increase --qbatch_epoch.
+
+3) Training is too slow
+- Lower --qbatch_time.
+- Keep --qbatch_epoch at 1 or 2.
+
+4) CFA uses very small aligned sample set
+- Increase --qbatch_time so both models keep more val/test rows.
+- Or run CFA with selected models via --cfa_models.
+
+Notes
+-----
+- These batch trainers are intentionally lightweight by default.
+- They use auto-capping based on pilot runtime, so --qbatch_time is the most
+  important quality/speed knob.
+- For reproducible comparisons, keep all non-quantum flags unchanged while
+  tuning one quantum knob at a time.

@@ -1,42 +1,95 @@
-"""Models package — auto-discovers all SklearnTrainer subclasses."""
-import importlib
-import os
+"""
+Model auto-discovery for the image classification pipeline.
+
+Any .py file in models/ that defines a BaseModel subclass is automatically
+found and registered here — no manual imports needed. To add a new model,
+just create models/your_model.py with a class that extends BaseModel.
+
+Usage:
+    from models import get_models
+    models = get_models("all", args)   # returns list of BaseModel instances
+"""
+
 import pkgutil
+import importlib
+import inspect
+from pathlib import Path
+from .base import BaseModel
 
-# Explicit imports for non-sklearn models
-from .classical_alstm import AWLSTM
-from .quantum_lstm import QuantumTrainer
-from .QLSTM_v0_Batch import BatchQLSTMTrainer
-from .vqFWP_Batch_time_series import BatchVQFWPTrainer
-from .test_oom import OOMTestTrainer
 
-# Auto-discover all SklearnTrainer subclasses from .py files in this directory.
-# Each file that defines a SklearnTrainer subclass is imported, and the class
-# is registered in SKLEARN_REGISTRY keyed by its model_name.
+def _discover_models() -> dict:
+    """
+    Scan the models/ directory for all BaseModel subclasses.
 
-from .sklearn_base import SklearnTrainer
+    Uses pkgutil to iterate modules (same approach as quantumstd1).
+    Returns dict {ClassName: class}.
+    """
+    registry = {}
+    models_dir = str(Path(__file__).parent)
 
-SKLEARN_REGISTRY = {}  # model_name -> class
+    for _, module_name, _ in pkgutil.iter_modules([models_dir]):
+        if module_name == "base":
+            continue  # skip the abstract base class itself
 
-_pkg_dir = os.path.dirname(__file__)
-_skip = {'__init__', 'sklearn_base', 'monitor', 'cfa', 'classical_alstm',
-         'quantum_lstm', 'QLSTM_v0_Batch', 'vqFWP_Batch_time_series',
-         'test_oom'}
+        # Dynamically import each module in models/
+        module = importlib.import_module(f".{module_name}", package=__name__)
 
-for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
-    if _name in _skip:
-        continue
-    try:
-        _mod = importlib.import_module('.' + _name, __package__)
-    except Exception:
-        continue
-    for _attr in dir(_mod):
-        _obj = getattr(_mod, _attr)
-        if (isinstance(_obj, type)
-                and issubclass(_obj, SklearnTrainer)
-                and _obj is not SklearnTrainer):
-            if _obj not in SKLEARN_REGISTRY.values():
-                SKLEARN_REGISTRY[_attr] = _obj
+        # Find all classes in the module that subclass BaseModel
+        for name, obj in inspect.getmembers(module, inspect.isclass):
+            if issubclass(obj, BaseModel) and obj is not BaseModel:
+                registry[name] = obj
 
-# Clean up module namespace
-del importlib, os, pkgutil, _pkg_dir, _skip
+    return registry
+
+
+# Maps --model flag values to class name prefixes for filtering
+_FLAG_MAP = {
+    "rf":  "RandomForest",   # e.g. RandomForestModel
+    "cnn": "CNN",            # e.g. CNNModel
+    "all": None,             # all discovered models
+}
+
+
+def get_models(model_flag: str, args) -> list:
+    """
+    Return instantiated model objects based on the --model CLI flag.
+
+    Passes relevant hyperparameters from args (e.g. --epochs for CNN).
+
+    Args:
+        model_flag: "rf", "cnn", or "all"
+        args:       argparse Namespace (used to pass hyperparams to models)
+
+    Returns:
+        List of BaseModel instances, ready to call .train() on.
+    """
+    registry = _discover_models()
+
+    # Filter registry based on the flag
+    if model_flag == "all":
+        selected = registry
+    elif model_flag in _FLAG_MAP:
+        prefix = _FLAG_MAP[model_flag]
+        selected = {k: v for k, v in registry.items() if k.startswith(prefix)}
+    else:
+        # Allow passing a class name directly (e.g. -m RandomForestModel)
+        selected = {k: v for k, v in registry.items() if k.lower() == model_flag.lower()}
+
+    if not selected:
+        raise ValueError(
+            f"No models match '{model_flag}'. "
+            f"Available: {list(registry.keys())} or flags: {list(_FLAG_MAP.keys())}"
+        )
+
+    # Instantiate each model class, wiring in hyperparams from args
+    instances = []
+    for name, cls in selected.items():
+        if "CNN" in name:
+            # Pass epochs from --epochs flag; CNN reads it at construction time
+            instances.append(cls(epochs=args.epochs))
+        else:
+            # sklearn-based models use their own defaults
+            instances.append(cls())
+
+    print(f"Models to run: {[m.name for m in instances]}")
+    return instances
